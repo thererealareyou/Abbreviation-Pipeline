@@ -1,20 +1,35 @@
 import fitz
 import re
 from pathlib import Path
+from src.utils.logger import PipelineLogger
 
+logger = PipelineLogger.get_logger(__name__)
 
 def clean_text(text: str) -> str:
-    """Базовая очистка текста от мусорных переносов и лишних пробелов."""
+    """Базовая очистка текста от мусорных переносов и лишних пробелов.
+
+    Args:
+        text (str): Исходная текстовая строка для очистки.
+
+    Returns:
+        str: Очищенная строка без лишних пробельных символов и переносов.
+    """
+
     text = re.sub(r'\n+', ' ', text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
 
 
 def split_into_sentences(text: str) -> list[str]:
+    """Делитель текста, который режет строго по '.' или ';'. Сохраняет сам разделитель в конце предложения.
+
+    Args:
+        text (str): Исходный очищенный текст для разбиения на предложения.
+
+    Returns:
+        list[str]: Список предложений, где каждое сохраняет свой оригинальный знак пунктуации на конце.
     """
-    Делитель текста, который режет строго по '.' или ';'.
-    Сохраняет сам разделитель в конце предложения.
-    """
+
     text = clean_text(text)
 
     # Разбиваем текст по точкам и точкам с запятой, сохраняя разделители
@@ -39,11 +54,17 @@ def sentence_window(
         min_chars: int = 10,
         max_chars: int = 350,
 ) -> list[str]:
+    """Собирает окна из нескольких предложений. Окно должно быть от min_chars до max_chars символов и заканчиваться на '.' или ';'.
+
+    Args:
+        sentences (list[str]): Список предварительно разбитых предложений.
+        min_chars (int, optional): Минимально допустимая длина текстового окна в символах. По умолчанию 10.
+        max_chars (int, optional): Максимально допустимая длина текстового окна в символах. По умолчанию 350.
+
+    Returns:
+        list[str]: Список сформированных текстовых окон (чанков), удовлетворяющих заданным ограничениям по длине.
     """
-    Собирает окна из нескольких предложений.
-    Окно должно быть от min_chars до max_chars символов и
-    заканчиваться на '.' или ';'.
-    """
+
     windows = []
     current_window = ""
 
@@ -81,7 +102,17 @@ def extract_windows_from_pdf(
         min_chars: int = 10,
         max_chars: int = 350,
 ) -> list[str]:
-    """Извлекает текст из PDF и возвращает список окон по предложениям."""
+    """Извлекает текст из PDF и возвращает список окон по предложениям.
+
+    Args:
+        pdf_path (str | Path): Путь к целевому PDF-файлу для чтения.
+        min_chars (int, optional): Минимально допустимая длина текстового окна в символах. По умолчанию 10.
+        max_chars (int, optional): Максимально допустимая длина текстового окна в символах. По умолчанию 350.
+
+    Returns:
+        list[str]: Список текстовых окон, извлеченных и сформированных из содержимого PDF-документа.
+    """
+
     doc = fitz.open(pdf_path)
     full_text = ""
 
@@ -98,15 +129,22 @@ def extract_sentences_from_folder(
         min_chars: int = 10,
         max_chars: int = 350,
 ) -> list[str]:
+    """Читает все PDF-файлы в папке и возвращает объединённый список окон. Каждое окно — 1–N предложений.
+
+    Args:
+        folder_path (str | Path): Путь к директории, в которой находятся PDF-файлы.
+        min_chars (int, optional): Минимально допустимая длина текстового окна в символах. По умолчанию 10.
+        max_chars (int, optional): Максимально допустимая длина текстового окна в символах. По умолчанию 350.
+
+    Returns:
+        list[str]: Общий объединенный список текстовых окон, собранный из всех PDF-файлов в указанной папке.
     """
-    Читает все PDF-файлы в папке и возвращает объединённый список окон.
-    Каждое окно — 1–N предложений (от min_chars до max_chars символов).
-    """
+
     folder = Path(folder_path)
     pdf_files = sorted(folder.glob("*.pdf"))
 
     if not pdf_files:
-        print(f"[WARNING] PDF-файлы не найдены в папке: {folder}")
+        logger.warning(f"PDF-файлы не найдены в папке: {folder}")
         return []
 
     all_windows: list[str] = []
@@ -115,8 +153,8 @@ def extract_sentences_from_folder(
         try:
             windows = extract_windows_from_pdf(pdf_path, min_chars=min_chars, max_chars=max_chars)
             all_windows.extend(windows)
-            print(f"[OK] {pdf_path.name} → {len(windows)} окно(н)")
+            logger.info(f"{pdf_path.name} → {len(windows)} окно(н)")
         except Exception as e:
-            print(f"[ERROR] {pdf_path.name}: {e}")
+            logger.error(f"{pdf_path.name}: {e}")
 
     return all_windows
