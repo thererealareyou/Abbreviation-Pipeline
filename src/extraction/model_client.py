@@ -5,6 +5,9 @@ import aiohttp
 import pandas as pd
 from colorama import init, Fore, Style
 from pathlib import Path
+from src.utils.logger import PipelineLogger
+
+logger = PipelineLogger.get_logger(__name__)
 
 with open("config/settings.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
@@ -66,10 +69,9 @@ class AsyncAPIModelClient:
                     # Если ошибка (например, 400), читаем текст ошибки ДО вызова raise_for_status()
                     if response.status != 200:
                         error_text = await response.text()
-                        print(f"\n[HTTP ОШИБКА {response.status} на этапе {stage}]")
-                        print(f"Ответ сервера: {error_text}")
+                        logger.error(f"\n[HTTP ОШИБКА {response.status} на этапе {stage}]. Ответ сервера: {error_text}")
                         # Выводим первые 200 символов промпта, чтобы понять, какой текст сломал сервер
-                        print(f"Сломанный промпт: {prompt[:200]}...")
+                        logger.debug(f"Сломанный промпт: {prompt[:200]}...")
                         return "[]"  # Возвращаем дефолт, чтобы не уронить весь батч
 
                     # Если всё ОК
@@ -77,7 +79,7 @@ class AsyncAPIModelClient:
                     return res_json["choices"][0]["message"]["content"]
 
             except Exception as e:
-                print(f"[Критическая ошибка aiohttp]: {e}")
+                logger.error(f"[Критическая ошибка aiohttp]: {e}")
                 return "[]"
 
 

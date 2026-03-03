@@ -1,7 +1,9 @@
 import fitz
 import re
 from pathlib import Path
+from src.utils.logger import PipelineLogger
 
+logger = PipelineLogger.get_logger(__name__)
 
 def clean_text(text: str) -> str:
     """Базовая очистка текста от мусорных переносов и лишних пробелов.
@@ -142,7 +144,7 @@ def extract_sentences_from_folder(
     pdf_files = sorted(folder.glob("*.pdf"))
 
     if not pdf_files:
-        print(f"[WARNING] PDF-файлы не найдены в папке: {folder}")
+        logger.warning(f"PDF-файлы не найдены в папке: {folder}")
         return []
 
     all_windows: list[str] = []
@@ -151,8 +153,8 @@ def extract_sentences_from_folder(
         try:
             windows = extract_windows_from_pdf(pdf_path, min_chars=min_chars, max_chars=max_chars)
             all_windows.extend(windows)
-            print(f"[OK] {pdf_path.name} → {len(windows)} окно(н)")
+            logger.info(f"{pdf_path.name} → {len(windows)} окно(н)")
         except Exception as e:
-            print(f"[ERROR] {pdf_path.name}: {e}")
+            logger.error(f"{pdf_path.name}: {e}")
 
     return all_windows

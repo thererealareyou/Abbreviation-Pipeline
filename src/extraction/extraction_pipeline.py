@@ -6,7 +6,9 @@ from src.extraction.model_client import AsyncAPIModelClient, parse_llm_definitio
 from src.extraction.regex_detector import clean_abbr_list, clean_terms_list
 from src.dataset_builder.dataset_examiner import verify_expansion
 from src.utils.io_helpers import parse_stringified_list
+from src.utils.logger import PipelineLogger
 
+logger = PipelineLogger.get_logger(__name__)
 
 async def build_initial_dataframe_async(chunks: list, model: AsyncAPIModelClient, config: dict) -> pd.DataFrame:
     """Первый этап: Извлекаем списки аббревиатур и терминов.
@@ -22,7 +24,7 @@ async def build_initial_dataframe_async(chunks: list, model: AsyncAPIModelClient
             исходный текст (`chunk`), список аббревиатур (`abbrs`) и
             список терминов (`terms`).
     """
-    print("\nПоиск аббревиатур и терминов (Пакетная обработка)...")
+    logger.info("\nПоиск аббревиатур и терминов (Пакетная обработка)...")
     rows = []
 
     async with aiohttp.ClientSession() as session:
@@ -35,12 +37,23 @@ async def build_initial_dataframe_async(chunks: list, model: AsyncAPIModelClient
         abbr_results = await tqdm_asyncio.gather(*abbr_tasks, desc="Abbrs")
         term_results = await tqdm_asyncio.gather(*term_tasks, desc="Terms")
 
-    print("\nСборка базового DataFrame...")
-    for chunk, raw_abbrs, raw_terms in zip(chunks, abbr_results, term_results):
+    logger.info("\nСборка базового DataFrame...")
+    total_chunks = len(chunks)
+    # Используем enumerate, чтобы знать номер текущего чанка
+    for i, (chunk, raw_abbrs, raw_terms) in enumerate(zip(chunks, abbr_results, term_results), start=1):
+
         cleaned_abbr = clean_abbr_list(chunk, raw_abbrs)
         cleaned_term = clean_terms_list(chunk, raw_terms)
+
+        # ЛОГИРОВАНИЕ ПРОГРЕССА ПО ЧАНКАМ
+        # Рекомендую использовать logger.debug, чтобы не спамить в консоль, если чанков тысячи.
+        # Если чанков мало (как сейчас 100), можно оставить logger.info
         if cleaned_abbr or cleaned_term:
+            logger.debug("[Чанк %d/%d] Найдено: %d аббр., %d терм.",
+                         i, total_chunks, len(cleaned_abbr), len(cleaned_term))
             rows.append({"chunk": chunk, "abbrs": cleaned_abbr, "terms": cleaned_term})
+        else:
+            logger.debug("[Чанк %d/%d] Сущности не найдены, пропуск.", i, total_chunks)
 
     return pd.DataFrame(rows)
 
@@ -63,7 +76,7 @@ async def enrich_with_definitions_async(df: pd.DataFrame, model: AsyncAPIModelCl
             'dropped_terms' (отклоненные определения терминов).
     """
 
-    print("\nНачинаем строгое извлечение определений...")
+    logger.info("\nНачинаем строгое извлечение определений...")
 
     tasks = {'abbr': [], 'term': []}
     meta = {'abbr': [], 'term': []}
@@ -86,7 +99,7 @@ async def enrich_with_definitions_async(df: pd.DataFrame, model: AsyncAPIModelCl
                 meta['term'].append((idx, term, chunk_text))
 
         # 2. Выполнение задач
-        print(f"\nЗапуск {len(tasks['abbr'])} задач для аббревиатур и {len(tasks['term'])} для терминов...")
+        logger.info(f"\nЗапуск {len(tasks['abbr'])} задач для аббревиатур и {len(tasks['term'])} для терминов...")
         raw_results = {
             'abbr': await tqdm_asyncio.gather(*tasks['abbr'], desc="Def Abbrs") if tasks['abbr'] else [],
             'term': await tqdm_asyncio.gather(*tasks['term'], desc="Def Terms") if tasks['term'] else []
@@ -153,7 +166,7 @@ async def resolve_conflicts_async(conflict_abbrs: dict, conflict_terms: dict, mo
             - `resolved_terms` (dict): словарь с итоговыми (разрешенными) определениями терминов.
     """
 
-    print(
+    logger.info(
         f"\nЗапуск 3 этапа: Разрешение конфликтов ({len(conflict_abbrs)} аббревиатур, {len(conflict_terms)} терминов)...")
 
     resolved_abbrs = {}
@@ -202,7 +215,7 @@ async def resolve_conflicts_async(conflict_abbrs: dict, conflict_terms: dict, mo
 
             resolved_abbrs[entity] = final_val
         except Exception as e:
-            print(f"Ошибка парсинга аббревиатуры {entity}: {e}. Беру первый вариант.")
+            logger.warning(f"Ошибка парсинга аббревиатуры {entity}: {e}. Беру первый вариант.")
             resolved_abbrs[entity] = conflict_abbrs[entity][0]
 
     # 5. Парсинг результатов для ТЕРМИНОВ
@@ -218,7 +231,7 @@ async def resolve_conflicts_async(conflict_abbrs: dict, conflict_terms: dict, mo
 
             resolved_terms[entity] = final_val
         except Exception as e:
-            print(f"Ошибка парсинга термина {entity}: {e}. Беру первый вариант.")
+            logger.warning(f"Ошибка парсинга термина {entity}: {e}. Беру первый вариант.")
             resolved_terms[entity] = conflict_terms[entity][0]
 
     return resolved_abbrs, resolved_terms
