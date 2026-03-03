@@ -9,7 +9,19 @@ from src.utils.io_helpers import parse_stringified_list
 
 
 async def build_initial_dataframe_async(chunks: list, model: AsyncAPIModelClient, config: dict) -> pd.DataFrame:
-    """Первый этап: Извлекаем списки аббревиатур и терминов."""
+    """Первый этап: Извлекаем списки аббревиатур и терминов.
+
+    Args:
+        chunks (list): Список текстовых фрагментов (чанков) для обработки.
+        model (AsyncAPIModelClient): Асинхронный клиент для взаимодействия с LLM API.
+        config (dict): Словарь с конфигурацией, содержащий инструкции для LLM
+            (например, `config["llm"]["abbr"]["instructions"]`).
+
+    Returns:
+        pd.DataFrame: Датафрейм с результатами, где каждая строка содержит
+            исходный текст (`chunk`), список аббревиатур (`abbrs`) и
+            список терминов (`terms`).
+    """
     print("\nПоиск аббревиатур и терминов (Пакетная обработка)...")
     rows = []
 
@@ -34,7 +46,23 @@ async def build_initial_dataframe_async(chunks: list, model: AsyncAPIModelClient
 
 
 async def enrich_with_definitions_async(df: pd.DataFrame, model: AsyncAPIModelClient, config: dict) -> pd.DataFrame:
-    """Второй этап: Поиск точных определений."""
+    """Второй этап: Поиск точных определений для извлеченных аббревиатур и терминов.
+
+    Args:
+        df (pd.DataFrame): Исходный датафрейм, содержащий текстовые фрагменты ('chunk')
+            и списки извлеченных аббревиатур ('abbrs') и терминов ('terms').
+        model (AsyncAPIModelClient): Асинхронный клиент для взаимодействия с LLM API.
+        config (dict): Словарь с конфигурацией, содержащий инструкции и промпты для
+            генерации определений (например, `config['llm']['def_abbr']['instructions']`).
+
+    Returns:
+        pd.DataFrame: Обогащенный датафрейм с добавленными столбцами:
+            'abbr_definitions' (валидные определения аббревиатур),
+            'term_definitions' (валидные определения терминов),
+            'dropped_abbr' (отклоненные определения аббревиатур),
+            'dropped_terms' (отклоненные определения терминов).
+    """
+
     print("\nНачинаем строгое извлечение определений...")
 
     tasks = {'abbr': [], 'term': []}
@@ -107,10 +135,24 @@ async def enrich_with_definitions_async(df: pd.DataFrame, model: AsyncAPIModelCl
 
 async def resolve_conflicts_async(conflict_abbrs: dict, conflict_terms: dict, model: AsyncAPIModelClient,
                                   config: dict) -> tuple[dict, dict]:
+    """Третий этап: Разрешение конфликтов для аббревиатур и терминов параллельно.
+
+    Args:
+        conflict_abbrs (dict): Словарь с конфликтующими определениями аббревиатур,
+            где ключ — аббревиатура, а значение — список вариантов ее определений.
+        conflict_terms (dict): Словарь с конфликтующими определениями терминов,
+            где ключ — термин, а значение — список вариантов его определений.
+        model (AsyncAPIModelClient): Асинхронный клиент для взаимодействия с LLM API.
+        config (dict): Словарь с конфигурацией, содержащий инструкции для LLM
+            по разрешению конфликтов (например, `config["llm"]["resolve_abbr"]["instructions"]`).
+
+    Returns:
+        tuple[dict, dict]: Кортеж из двух словарей `(resolved_abbrs, resolved_terms)`:
+
+            - `resolved_abbrs` (dict): словарь с итоговыми (разрешенными) определениями аббревиатур.
+            - `resolved_terms` (dict): словарь с итоговыми (разрешенными) определениями терминов.
     """
-    Третий этап: Разрешение конфликтов для аббревиатур и терминов параллельно.
-    Возвращает два словаря: (resolved_abbrs, resolved_terms)
-    """
+
     print(
         f"\nЗапуск 3 этапа: Разрешение конфликтов ({len(conflict_abbrs)} аббревиатур, {len(conflict_terms)} терминов)...")
 

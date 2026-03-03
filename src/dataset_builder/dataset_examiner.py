@@ -4,10 +4,20 @@ from collections import defaultdict
 
 
 def verify_expansion(abbr: str, expansion: str, chunk_text: str, similarity_threshold: float = 80.0) -> bool:
+    """Проверяет, является ли предложенная моделью расшифровка достоверной.
+
+    Args:
+        abbr (str): Аббревиатура для проверки.
+        expansion (str): Предложенная моделью расшифровка (определение) аббревиатуры.
+        chunk_text (str): Исходный текстовый фрагмент, на основе которого была сгенерирована расшифровка.
+        similarity_threshold (float, optional): Порог схожести для нечеткого поиска (fuzzy matching)
+            расшифровки в исходном тексте. По умолчанию 80.0.
+
+    Returns:
+        bool: True, если расшифровка признана достоверной (прошла проверки и найдена в тексте),
+            или False, если она отклонена (исключаем).
     """
-    Проверяет, является ли предложенная моделью расшифровка достоверной.
-    Возвращает True (оставляем) или False (исключаем).
-    """
+
     if not expansion or expansion.lower() == "null":
         return False
 
@@ -25,9 +35,19 @@ def verify_expansion(abbr: str, expansion: str, chunk_text: str, similarity_thre
     return False
 
 
-def aggregate_definitions(df):
-    """
-    Собирает все варианты расшифровок/определений из DataFrame.
+def aggregate_definitions(df) -> tuple:
+    """Собирает все варианты расшифровок/определений из DataFrame.
+
+    Args:
+        df (dict | pd.Series): Структура данных (словарь или объект pandas),
+            содержащая сущности (аббревиатуры или термины) в качестве ключей и
+            коллекции их вариантов определений (множества или списки) в качестве значений.
+
+    Returns:
+        tuple[dict, dict]: Кортеж из двух словарей `(resolved_dict, conflicts_dict)`:
+
+            - `resolved_dict` (dict): Словарь сущностей, для которых найден ровно один (однозначный) вариант определения.
+            - `conflicts_dict` (dict): Словарь сущностей, для которых найдено несколько (конфликтующих) вариантов определений.
     """
 
     resolved_dict = {}
