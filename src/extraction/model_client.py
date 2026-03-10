@@ -66,15 +66,12 @@ class AsyncAPIModelClient:
                     "/v1/chat/completions") else self.url
 
                 async with session.post(endpoint, json=payload) as response:
-                    # Если ошибка (например, 400), читаем текст ошибки ДО вызова raise_for_status()
                     if response.status != 200:
                         error_text = await response.text()
                         logger.error(f"\n[HTTP ОШИБКА {response.status} на этапе {stage}]. Ответ сервера: {error_text}")
-                        # Выводим первые 200 символов промпта, чтобы понять, какой текст сломал сервер
                         logger.debug(f"Сломанный промпт: {prompt[:200]}...")
-                        return "[]"  # Возвращаем дефолт, чтобы не уронить весь батч
+                        return "[]"
 
-                    # Если всё ОК
                     res_json = await response.json()
                     return res_json["choices"][0]["message"]["content"]
 

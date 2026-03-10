@@ -4,114 +4,137 @@ import yaml
 import pandas as pd
 import json
 
-from src.utils.logger import PipelineLogger  # ИМПОРТИРУЕМ НАШ ЛОГГЕР
+from src.utils.logger import PipelineLogger
 from src.extraction.model_client import AsyncAPIModelClient
 from src.extraction.pdf_parser import extract_sentences_from_folder
 from src.dataset_builder.dataset_examiner import aggregate_definitions
+from src.dataset_builder.variations_former import form_corresponging_table
 from src.extraction.extraction_pipeline import (build_initial_dataframe_async,
+                                                build_initial_dataframe_dummy,
                                                 enrich_with_definitions_async,
                                                 resolve_conflicts_async)
 from src.utils.io_helpers import export_df_to_json
 
-# Инициализируем логгер для главного модуля
-logger = PipelineLogger.get_logger(__name__)
 
+logger = PipelineLogger.get_logger(__name__)
 
 def load_config():
     with open("config/settings.yaml", "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-
-async def main():
-    logger.info("=== ЗАПУСК ПАЙПЛАЙНА ИЗВЛЕЧЕНИЯ СУЩНОСТЕЙ ===")
-
+async def main(stage_1: bool,
+               stage_2: bool,
+               stage_3: bool,
+               stage_4: bool):
     try:
         config = load_config()
         logger.debug("Конфигурация успешно загружена.")
 
-        # 1. Инициализация и загрузка чанков
-        logger.info("Чтение PDF-файлов и извлечение текста...")
-        chunks = extract_sentences_from_folder(config["paths"]["raw_data"])[:100]  # Ограничение 100 для теста
-
-        if not chunks:
-            logger.warning("Не найдено ни одного чанка для обработки. Завершение работы.")
-            return
-
-        logger.info("Успешно извлечено %d чанков для обработки.", len(chunks))
-
         model = AsyncAPIModelClient(
             url=config["llm"]["api"]["url"],
-            temperature=config["llm"]["settings"]["temperature"],
-            max_parallel=config["llm"]["api"]["max_parallel"]
+            max_parallel=config["llm"]["api"]["max_parallel"],
+            temperature=config["llm"]["api"]["temperature"]
         )
-        logger.info("LLM клиент инициализирован (max_parallel=%d).", config["llm"]["api"]["max_parallel"])
+        logger.info(f"LLM клиент инициализирован (max_parallel={config["llm"]["api"]["max_parallel"]}).")
 
         # ==========================================
         # ЭТАП 1: ИЗВЛЕЧЕНИЕ
         # ==========================================
-        logger.info("--- [ЭТАП 1/3] ИЗВЛЕЧЕНИЕ АББРЕВИАТУР И ТЕРМИНОВ ---")
-        df = await build_initial_dataframe_async(chunks, model, config)
+        if stage_1:
+            logger.info("--- [ЭТАП 1/4] ИЗВЛЕЧЕНИЕ АББРЕВИАТУР И ТЕРМИНОВ ---")
+            chunks = extract_sentences_from_folder(config["paths"]["raw_data"]["folder"])
 
-        interim_path = os.path.join(config["paths"]["interim_data"], f"{config['files']['interim_file']}.xlsx")
-        df.to_excel(interim_path, columns=["chunk", "abbrs", "terms"], index=False)
-        logger.info("Этап 1 завершен. Промежуточные данные сохранены: %s (строк: %d)", interim_path, len(df))
+            if not chunks:
+                logger.warning("Не найдено ни одного чанка для обработки. Завершение работы.")
+                return
+
+            logger.info(f"Успешно извлечено {len(chunks)} чанков для обработки.")
+
+            df = await build_initial_dataframe_async(chunks, model, config)
+
+            interim_path = str(os.path.join(config["paths"]["interim_data"]["folder"],
+                                            config["paths"]["interim_data"]["sentences_xlsx"]))
+            df.to_excel(interim_path, columns=["chunk", "abbrs", "terms"], index=False)
+            logger.info(f"Этап 1 завершен. Промежуточные данные сохранены: {interim_path} (строк: {len(df)})")
 
         # ==========================================
         # ЭТАП 2: ПОЛУЧЕНИЕ ОПРЕДЕЛЕНИЙ
         # ==========================================
-        logger.info("--- [ЭТАП 2/3] ПОЛУЧЕНИЕ И ПРОВЕРКА ОПРЕДЕЛЕНИЙ ---")
-        df = pd.read_excel(interim_path)
-        df_enriched = await enrich_with_definitions_async(df, model, config)
+        if stage_2:
+            interim_path = str(os.path.join(config["paths"]["interim_data"]["folder"],
+                                            config["paths"]["interim_data"]["sentences_xlsx"]))
+            logger.info("--- [ЭТАП 2/4] ПОЛУЧЕНИЕ И ПРОВЕРКА ОПРЕДЕЛЕНИЙ ---")
+            df = pd.read_excel(interim_path)
+            df_enriched = await enrich_with_definitions_async(df, model, config)
 
-        validation_json_path = str(os.path.join(config["paths"]["validation"], config["files"]["extended_validation"]))
-        df_enriched.to_json(validation_json_path, force_ascii=False, orient='records', indent=4)
+            validation_json_path = str(os.path.join(config["paths"]["validation"]["folder"],
+                                            config["paths"]["validation"]["extended_json"]))
+            df_enriched.to_json(validation_json_path, force_ascii=False, orient='records', indent=4)
 
-        validation_glossary_path = str(
-            os.path.join(config["paths"]["validation"], config["files"]["validation_glossary"]))
-        mapping = {
-            "abbreviations": "abbr_definitions",
-            "terms": "term_definitions",
-            "dropped_abbreviations": "dropped_abbr",
-            "dropped_terms": "dropped_terms"
-        }
-        export_df_to_json(df_enriched, mapping, validation_glossary_path)
-        logger.info("Этап 2 завершен. Валидационные файлы сохранены в папку: %s", config["paths"]["validation"])
+            validation_glossary_path = str(os.path.join(config["paths"]["validation"]["folder"],
+                                            config["paths"]["validation"]["gloss_json"]))
+            mapping = {
+                "abbreviations": "abbr_definitions",
+                "terms": "term_definitions",
+                "dropped_abbreviations": "dropped_abbr",
+                "dropped_terms": "dropped_terms"
+            }
+
+            export_df_to_json(df_enriched, mapping, validation_glossary_path)
+            logger.info(f"Этап 2 завершен. Валидационные файлы сохранены в папку: {config["paths"]["validation"]}")
 
         # ==========================================
         # ЭТАП 3: ФОРМИРОВАНИЕ ИТОГОВОГО ГЛОССАРИЯ
         # ==========================================
-        logger.info("--- [ЭТАП 3/3] РАЗРЕШЕНИЕ КОНФЛИКТОВ И СБОРКА ГЛОССАРИЯ ---")
-        df_val = pd.read_json(validation_glossary_path, typ="series")
+        if stage_3:
+            logger.info("--- [ЭТАП 3/4] РАЗРЕШЕНИЕ КОНФЛИКТОВ И СБОРКА ГЛОССАРИЯ ---")
+            validation_glossary_path = str(os.path.join(config["paths"]["validation"]["folder"],
+                                                        config["paths"]["validation"]["gloss_json"]))
 
-        final_abbrs, conflict_abbrs = aggregate_definitions(df_val["abbreviations"])
-        final_terms, conflict_terms = aggregate_definitions(df_val["terms"])
+            df_val = pd.read_json(validation_glossary_path, typ="series")
 
-        logger.info("Найдено конфликтов: %d для аббревиатур, %d для терминов.", len(conflict_abbrs),
-                    len(conflict_terms))
+            final_abbrs, conflict_abbrs = aggregate_definitions(df_val["abbreviations"])
+            final_terms, conflict_terms = aggregate_definitions(df_val["terms"])
 
-        resolved_abbrs, resolved_terms = await resolve_conflicts_async(conflict_abbrs, conflict_terms, model, config)
-        logger.info("Конфликты успешно разрешены.")
+            logger.info(f"Найдено конфликтов: {len(conflict_abbrs)} для аббревиатур, {len(conflict_terms)} для терминов.")
 
-        final_abbrs.update(resolved_abbrs)
-        final_terms.update(resolved_terms)
+            resolved_abbrs, resolved_terms = await resolve_conflicts_async(conflict_abbrs, conflict_terms, model, config)
+            logger.info("Конфликты успешно разрешены.")
 
-        final_data = {
-            "abbreviations": {k: [v] if isinstance(v, str) else v for k, v in final_abbrs.items()},
-            "terms": {k: [v] if isinstance(v, str) else v for k, v in final_terms.items()}
-        }
+            final_abbrs.update(resolved_abbrs)
+            final_terms.update(resolved_terms)
 
-        processed_path = str(os.path.join(config["paths"]["processed"], config["files"]["processed_file"]))
-        with open(processed_path, "w", encoding="utf-8") as f:
-            json.dump(final_data, f, ensure_ascii=False, indent=4)
+            final_data = {
+                "abbreviations": {k: [v] if isinstance(v, str) else v for k, v in final_abbrs.items()},
+                "terms": {k: [v] if isinstance(v, str) else v for k, v in final_terms.items()}
+            }
 
-        logger.info("=== ПАЙПЛАЙН УСПЕШНО ЗАВЕРШЕН ===")
-        logger.info("Итоговый глоссарий сохранен: %s (Аббревиатур: %d, Терминов: %d)",
-                    processed_path, len(final_abbrs), len(final_terms))
+            processed_path = str(os.path.join(config["paths"]["processed"]["folder"],
+                                              config["paths"]["processed"]["final_gloss_json"]))
+            with open(processed_path, "w", encoding="utf-8") as f:
+                json.dump(final_data, f, ensure_ascii=False, indent=4)
+
+            logger.info(f"Итоговый глоссарий сохранен: {processed_path} (Аббревиатур: {len(final_abbrs)}, Терминов: {len(final_terms)}")
+
+        # ==========================================
+        # ЭТАП 4: ФОРМИРОВАНИЕ ГЛОССАРИЯ НАПИСАНИЯ
+        # ==========================================
+        if stage_4:
+            logger.info("--- [ЭТАП 4/4] ФОРМИРОВАНИЕ ГЛОССАРИЯ НАПИСАНИЯ ---")
+            glossary_path = str(os.path.join(config["paths"]["processed"]["folder"],
+                                              config["paths"]["processed"]["final_gloss_json"]))
+            variations_path = str(os.path.join(config["paths"]["processed"]["folder"],
+                                              config["paths"]["processed"]["eng_to_ru_json"]))
+
+            form_corresponging_table(glossary_path, 5, variations_path)
+            logger.info("=== ПАЙПЛАЙН УСПЕШНО ЗАВЕРШЕН ===")
 
     except Exception as e:
-        # exc_info=True запишет в лог всю простыню ошибки (Traceback)
-        logger.critical("Произошла критическая ошибка во время выполнения пайплайна!", exc_info=True)
+        logger.critical(f"Произошла критическая ошибка во время выполнения пайплайна: {e}", exc_info=True)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main(stage_1=True,
+                     stage_2=False,
+                     stage_3=False,
+                     stage_4=False))

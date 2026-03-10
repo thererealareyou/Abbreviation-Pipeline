@@ -16,11 +16,8 @@ def parse_stringified_list(val: str) -> list[str]:
     if not isinstance(val, str):
         return []
 
-    # Убираем скобки и кавычки
     cleaned_str = val.replace('[', '').replace(']', '').replace("'", "").replace('"', '')
-    # Разбиваем по запятой, удаляем пробелы и оставляем только непустые строки
     return [item.strip() for item in cleaned_str.split(',') if len(item.strip()) > 1]
-
 
 def export_df_to_json(df, mapping, output_filename: str = "output.json") -> dict:
     """Универсальная функция для сбора словарей из DataFrame в единый JSON.
