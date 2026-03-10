@@ -1,7 +1,5 @@
 import re
 from rapidfuzz import fuzz
-from collections import defaultdict
-
 
 def verify_expansion(abbr: str, expansion: str, chunk_text: str, similarity_threshold: float = 80.0) -> bool:
     """Проверяет, является ли предложенная моделью расшифровка достоверной.

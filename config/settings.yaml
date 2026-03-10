@@ -1,21 +1,23 @@
 paths:
-  raw_data: "data/01_raw"
-  interim_data: "data/02_interim"
-  validation: "data/03_validation"
-  processed: "data/04_processed"
+  raw_data:       # Stage 0 | Сырые данные должны лежать в folder.
+    folder: "data/01_raw"
 
-files:
-  interim_file: "sent_abbr_term"
-  validation_glossary: "global_glossary.json"
-  extended_validation: "extracted_definitions.json"
-  processed_file: "final_glossary.json"
+  interim_data:   # Stage 1 | Промежуточные данные (для удобства чтения в xlsx).
+    folder: "data/02_interim"
+    sentences_xlsx: "sent_abbr_term.xlsx"
 
-parsing:
-  chunk_size: 10
-  chunk_overlap: 5
+  validation:     # Stage 2 | Термины и аббревиатуры с конфликтами (несколькими значениями на один элемент).
+    folder: "data/03_validation"
+    gloss_json: "glossary.json" # Аббревиатуры и термины
+    extended_json: "extended_info.json" # Аббревиатуры, термины, предложения, расшифровки и дропнутые данные.
+
+  processed:      # Stage 3-4 | Разрешение конфликтов и построение ru-2-eng фраз.
+    folder: "data/04_processed"
+    final_gloss_json: "final_glossary.json" # Глоссарий без конфликтов
+    eng_to_ru_json: "variation_glossary.json" # ru-2-eng-словарь.
 
 llm:
-  abbr:
+  abbr: # Промпт для получения аббревиатур.
     role_prompt: >
       Ты - копирующий парсер аббревиатур.
     instructions: >
@@ -35,7 +37,8 @@ llm:
 
       Текст:
 
-  term:
+
+  term: # Промпт для получения терминов.
     role_prompt: >
       Ты — старший лингвист-аналитик с экспертизой в технической документации на русском языке. Твоя задача — точно извлечь все термины и понятия, которым в тексте даётся определение или перевод, строго опираясь на его содержимое.
     instructions: >
@@ -61,7 +64,8 @@ llm:
 
       Текст:
 
-  def_abbr:
+
+  def_abbr: # Промпт для поиска расшифровки аббревиатур.
     role_prompt: >
       Ты — бездушный JSON-парсер. У тебя нет памяти и знаний. Ты можешь только копировать текст.
     instructions: >
@@ -89,9 +93,9 @@ llm:
       Термин: "{ABBR}"
       Текст: {TEXT}
       Ответ:
-  
 
-  def_term:
+
+  def_term: # Промпт для поиска определения терминов.
     role_prompt: >
       Ты — бездушный JSON-парсер. У тебя нет памяти и знаний. Ты можешь только копировать текст.
     instructions: >
@@ -117,7 +121,8 @@ llm:
       Текст: {TEXT}
       Ответ:
 
-  resolve_abbr:
+
+  resolve_abbr: # Промпт для разрешения конфликтов аббревиатур.
     role_prompt: >
       Ты — бездушный автоматический редактор технического глоссария. У тебя нет мнения, ты работаешь только как парсер.
     instructions: >
@@ -130,6 +135,7 @@ llm:
       2. Если варианты похожи, выбери базовый, грамматически верный вариант (обычно в именительном падеже).
       3. Исключи из ответа саму аббревиатуру и любые тире (не пиши "ПО - программное обеспечение").
       4. ЗАПРЕЩЕНО писать отсебятину, рассуждения или "Ответ:".
+      5. Обращай внимание на заглавные буквы в тексте. Если они совпадают, то скорее всего это и есть расшифровка.
 
       ВХОДНЫЕ ДАННЫЕ:
       Аббревиатура: "{ENTITY}"
@@ -138,7 +144,8 @@ llm:
       ФОРМАТ ОТВЕТА (строго JSON):
       {{"resolved_definition": "Итоговая расшифровка"}}
 
-  resolve_term:
+
+  resolve_term: # Промпт для разрешения конфликтов терминов.
     role_prompt: >
       Ты — главный редактор технической документации. Твоя задача — составить эталонный глоссарий.
     instructions: >
@@ -159,12 +166,13 @@ llm:
       ФОРМАТ ОТВЕТА (строго JSON):
       {{"resolved_definition": "Итоговое смысловое определение"}}
 
-  settings:
-    temperature: 0.0
+
   api:
     url: "http://localhost:8000"
-    max_parallel: 8
-  local:
-    model_path: "IlyaGusev/saiga_llama3_8b_gguf"
-    quant_path: "model-q4_K.gguf"
-    device: "cuda"
+    max_parallel: 8 # Ставить в соответствии с -np в .bat!
+    temperature: 0.1
+
+p.s.: >
+  Вследствие невозможности (на текущий момент) поставить llama-cpp-python на 3.13.x, код предназначен для запуска 
+  llama-cpp отдельно. С восемью параллельными сессиями на 4050 Laptop 6GB модель t-lite-it-1.0 инферинсится 
+  со скоростью примерно 30t/s. Рекомендуемые параметры указаны в .bat-файле.

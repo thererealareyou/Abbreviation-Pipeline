@@ -10,6 +10,27 @@ from src.utils.logger import PipelineLogger
 
 logger = PipelineLogger.get_logger(__name__)
 
+def build_initial_dataframe_dummy(chunks: list[str]) -> pd.DataFrame:
+    """Тестовый этап: не обращается к LLM, возвращает пустые списки."""
+
+    logger.info("\nТест парсера PDF: формируем DataFrame без запросов к LLM...")
+    rows = []
+    total_chunks = len(chunks)
+
+    for i, chunk in enumerate(chunks, start=1):
+        cleaned_abbr: list[str] = []
+        cleaned_term: list[str] = []
+
+        logger.debug(
+            f"[Чанк {i}/{total_chunks}] "
+            f"Тестовый режим: аббревиатуры и термины не извлекаются."
+        )
+
+        rows.append({"chunk": chunk, "abbrs": cleaned_abbr, "terms": cleaned_term})
+
+    return pd.DataFrame(rows)
+
+
 async def build_initial_dataframe_async(chunks: list, model: AsyncAPIModelClient, config: dict) -> pd.DataFrame:
     """Первый этап: Извлекаем списки аббревиатур и терминов.
 
@@ -39,21 +60,16 @@ async def build_initial_dataframe_async(chunks: list, model: AsyncAPIModelClient
 
     logger.info("\nСборка базового DataFrame...")
     total_chunks = len(chunks)
-    # Используем enumerate, чтобы знать номер текущего чанка
     for i, (chunk, raw_abbrs, raw_terms) in enumerate(zip(chunks, abbr_results, term_results), start=1):
 
         cleaned_abbr = clean_abbr_list(chunk, raw_abbrs)
         cleaned_term = clean_terms_list(chunk, raw_terms)
 
-        # ЛОГИРОВАНИЕ ПРОГРЕССА ПО ЧАНКАМ
-        # Рекомендую использовать logger.debug, чтобы не спамить в консоль, если чанков тысячи.
-        # Если чанков мало (как сейчас 100), можно оставить logger.info
         if cleaned_abbr or cleaned_term:
-            logger.debug("[Чанк %d/%d] Найдено: %d аббр., %d терм.",
-                         i, total_chunks, len(cleaned_abbr), len(cleaned_term))
+            logger.debug(f"[Чанк {i}/{total_chunks}] Найдено: {len(cleaned_abbr)} аббр., {len(cleaned_term)} терм.")
             rows.append({"chunk": chunk, "abbrs": cleaned_abbr, "terms": cleaned_term})
         else:
-            logger.debug("[Чанк %d/%d] Сущности не найдены, пропуск.", i, total_chunks)
+            logger.debug(f"[Чанк {i}/{total_chunks}] Сущности не найдены, пропуск.")
 
     return pd.DataFrame(rows)
 
@@ -82,7 +98,6 @@ async def enrich_with_definitions_async(df: pd.DataFrame, model: AsyncAPIModelCl
     meta = {'abbr': [], 'term': []}
 
     async with aiohttp.ClientSession() as session:
-        # 1. Формирование пула задач
         for idx, row in df.iterrows():
             chunk_text = row['chunk']
             abbrs = parse_stringified_list(row['abbrs'])
@@ -98,14 +113,12 @@ async def enrich_with_definitions_async(df: pd.DataFrame, model: AsyncAPIModelCl
                 tasks['term'].append(model.generate_async(session, prompt, stage="def_term"))
                 meta['term'].append((idx, term, chunk_text))
 
-        # 2. Выполнение задач
         logger.info(f"\nЗапуск {len(tasks['abbr'])} задач для аббревиатур и {len(tasks['term'])} для терминов...")
         raw_results = {
             'abbr': await tqdm_asyncio.gather(*tasks['abbr'], desc="Def Abbrs") if tasks['abbr'] else [],
             'term': await tqdm_asyncio.gather(*tasks['term'], desc="Def Terms") if tasks['term'] else []
         }
 
-    # 3. Словари для результатов
     results_by_row = {
         'abbr': {idx: {} for idx in df.index},
         'term': {idx: {} for idx in df.index},
@@ -113,7 +126,6 @@ async def enrich_with_definitions_async(df: pd.DataFrame, model: AsyncAPIModelCl
         'dropped_terms': {idx: {} for idx in df.index}
     }
 
-    # Вспомогательная функция для распределения ответов
     def process_results(category, is_abbr=False):
         for (idx, item, chunk_text), res in zip(meta[category], raw_results[category]):
             valid_def = parse_llm_definition_response(res)
@@ -122,22 +134,18 @@ async def enrich_with_definitions_async(df: pd.DataFrame, model: AsyncAPIModelCl
                 valid_def = None
 
             if valid_def:
-                # Проверка на галлюцинации / дублирование
                 if item in valid_def or (is_abbr and " — " in item):
                     drop_key = 'dropped_abbr' if is_abbr else 'dropped_terms'
                     results_by_row[drop_key].setdefault(idx, {}).setdefault(item, []).append(valid_def)
                     continue
 
-                # Добавление валидного определения
                 results_by_row[category].setdefault(idx, {}).setdefault(item, [])
                 if valid_def not in results_by_row[category][idx][item]:
                     results_by_row[category][idx][item].append(valid_def)
 
-    # 4. Обработка
     process_results('abbr', is_abbr=True)
     process_results('term', is_abbr=False)
 
-    # 5. Запись в DataFrame
     df['abbr_definitions'] = df.index.map(results_by_row['abbr'])
     df['term_definitions'] = df.index.map(results_by_row['term'])
     df['dropped_abbr'] = df.index.map(results_by_row['dropped_abbr'])
@@ -172,15 +180,13 @@ async def resolve_conflicts_async(conflict_abbrs: dict, conflict_terms: dict, mo
     resolved_abbrs = {}
     resolved_terms = {}
 
-    # Если конфликтов нет вообще, возвращаем пустые словари
     if not conflict_abbrs and not conflict_terms:
         return resolved_abbrs, resolved_terms
 
     tasks = {'abbr': [], 'term': []}
-    meta = {'abbr': [], 'term': []}  # Храним ключи (сущности), чтобы потом сопоставить результаты
+    meta = {'abbr': [], 'term': []}
 
     async with aiohttp.ClientSession() as session:
-        # 1. Формирование пула задач для АББРЕВИАТУР
         abbr_instructions = config["llm"]["resolve_abbr"]["instructions"]
         for entity, variants in conflict_abbrs.items():
             variants_str = json.dumps(variants, ensure_ascii=False)
@@ -188,7 +194,6 @@ async def resolve_conflicts_async(conflict_abbrs: dict, conflict_terms: dict, mo
             tasks['abbr'].append(model.generate_async(session, prompt, stage="resolve_abbr"))
             meta['abbr'].append(entity)
 
-        # 2. Формирование пула задач для ТЕРМИНОВ
         term_instructions = config["llm"]["resolve_term"]["instructions"]
         for entity, variants in conflict_terms.items():
             variants_str = json.dumps(variants, ensure_ascii=False)
@@ -196,20 +201,17 @@ async def resolve_conflicts_async(conflict_abbrs: dict, conflict_terms: dict, mo
             tasks['term'].append(model.generate_async(session, prompt, stage="resolve_term"))
             meta['term'].append(entity)
 
-        # 3. Выполнение задач (параллельно для обеих категорий)
         raw_results = {
             'abbr': await tqdm_asyncio.gather(*tasks['abbr'], desc="Resolve Abbrs") if tasks['abbr'] else [],
             'term': await tqdm_asyncio.gather(*tasks['term'], desc="Resolve Terms") if tasks['term'] else []
         }
 
-    # 4. Парсинг результатов для АББРЕВИАТУР
     for entity, res in zip(meta['abbr'], raw_results['abbr']):
         try:
             clean_res = res.strip().replace('```json', '').replace('```', '')
             data = json.loads(clean_res)
             final_val = data.get("resolved_definition", "").strip()
 
-            # Фолбэк, если LLM вернула пустоту
             if not final_val:
                 final_val = conflict_abbrs[entity][0]
 
@@ -218,14 +220,12 @@ async def resolve_conflicts_async(conflict_abbrs: dict, conflict_terms: dict, mo
             logger.warning(f"Ошибка парсинга аббревиатуры {entity}: {e}. Беру первый вариант.")
             resolved_abbrs[entity] = conflict_abbrs[entity][0]
 
-    # 5. Парсинг результатов для ТЕРМИНОВ
     for entity, res in zip(meta['term'], raw_results['term']):
         try:
             clean_res = res.strip().replace('```json', '').replace('```', '')
             data = json.loads(clean_res)
             final_val = data.get("resolved_definition", "").strip()
 
-            # Фолбэк, если LLM вернула пустоту
             if not final_val:
                 final_val = conflict_terms[entity][0]
 

@@ -25,28 +25,23 @@ class PipelineLogger:
         """
         logger = logging.getLogger(name)
 
-        # Предотвращаем дублирование логов, если логгер уже инициализирован
         if logger.hasHandlers():
             return logger
 
         logger.setLevel(level)
 
-        # Формат: [ГГГГ-ММ-ДД ЧЧ:ММ:СС] - ИмяМодуля - УРОВЕНЬ - Сообщение
         formatter = logging.Formatter(
             fmt='[%(asctime)s] - %(name)s - %(levelname)s - %(message)s',
             datefmt='%Y-%m-%d %H:%M:%S'
         )
 
-        # Убеждаемся, что папка для логов существует
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 1. Обработчик для записи в файл (с поддержкой UTF-8)
         file_handler = logging.FileHandler(log_path, encoding='utf-8')
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
-        # 2. Обработчик для вывода в консоль
         console_handler = logging.StreamHandler(sys.stdout)
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
