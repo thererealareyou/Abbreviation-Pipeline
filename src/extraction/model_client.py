@@ -2,17 +2,12 @@ import json
 import yaml
 import asyncio
 import aiohttp
-import pandas as pd
-from colorama import init, Fore, Style
-from pathlib import Path
 from src.utils.logger import PipelineLogger
 
 logger = PipelineLogger.get_logger(__name__)
 
 with open("config/settings.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
-
-init(autoreset=True)
 
 class AsyncAPIModelClient:
     """Асинхронный клиент для обращения к локальному серверу (llama.cpp server) батчами.
