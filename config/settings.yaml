@@ -16,6 +16,10 @@ paths:
     final_gloss_json: "final_glossary.json" # Глоссарий без конфликтов
     eng_to_ru_json: "variation_glossary.json" # ru-2-eng-словарь.
 
+db:
+  name: "chunks.db"
+  table_name: "chunk_table"
+
 llm:
   abbr: # Промпт для получения аббревиатур.
     role_prompt: >

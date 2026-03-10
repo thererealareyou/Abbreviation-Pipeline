@@ -10,7 +10,6 @@ from src.extraction.pdf_parser import extract_sentences_from_folder
 from src.dataset_builder.dataset_examiner import aggregate_definitions
 from src.dataset_builder.variations_former import form_corresponging_table
 from src.extraction.extraction_pipeline import (build_initial_dataframe_async,
-                                                build_initial_dataframe_dummy,
                                                 enrich_with_definitions_async,
                                                 resolve_conflicts_async)
 from src.utils.io_helpers import export_df_to_json
@@ -134,7 +133,7 @@ async def main(stage_1: bool,
 
 
 if __name__ == "__main__":
-    asyncio.run(main(stage_1=True,
-                     stage_2=False,
-                     stage_3=False,
-                     stage_4=False))
+    asyncio.run(main(stage_1=False,
+                     stage_2=True,
+                     stage_3=True,
+                     stage_4=True))
