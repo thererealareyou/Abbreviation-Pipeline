@@ -10,10 +10,10 @@ from pydantic import BaseModel
 from typing import List
 
 from src.utils.db import SessionLocal
-from src.utils.models import Document, Chunk, ExtractedItem
+from src.utils.models import Document, Chunk, ExtractedItem, TransliterationEntry
 from src.utils.tasks import (
-    bulk_extract_terms,
-    bulk_extract_abbrs,
+    bulk_extract_terms_batch,
+    bulk_extract_abbrs_batch,
     resolve_term_conflicts,
     resolve_abbr_conflicts,
 )
@@ -30,6 +30,8 @@ with open("config/settings.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 app = FastAPI(title="Автоматический извлекатель доменных аббревиатур (АИДА)")
+
+CHUNK_BATCH = 100
 
 # ---------------------------------------------------------------------------
 # Схемы
@@ -104,19 +106,22 @@ def start_extraction(payload: TextsRequest):
             db.add(doc)
 
         db.flush()
-
         chunks_to_insert = [Chunk(doc_id=doc.id, text=t) for t in payload.texts]
-        db.bulk_save_objects(chunks_to_insert)
+        db.bulk_save_objects(chunks_to_insert, return_defaults=True)
         db.commit()
 
-        bulk_extract_terms.delay(doc.id)
-        bulk_extract_abbrs.delay(doc.id)
+        chunk_ids = [c.id for c in db.query(Chunk.id).filter_by(doc_id=doc.id).all()]
+
+        for i in range(0, len(chunk_ids), CHUNK_BATCH):
+            batch = chunk_ids[i:i + CHUNK_BATCH]
+            bulk_extract_terms_batch.delay(doc.id, batch)
+            bulk_extract_abbrs_batch.delay(doc.id, batch)
 
         return {
-            "document_id": payload.document_id,
-            "status": "Task submitted to queue",
-            "message": "Пайплайн запущен",
-        }
+                "document_id": payload.document_id,
+                "status": "Task submitted to queue",
+                "message": "Пайплайн запущен",
+            }
     except HTTPException:
         raise
     except Exception as e:
@@ -259,8 +264,15 @@ def build_final_dictionary(document_id: str):
         db.close()
 
 @app.get("/result/{document_id}", tags=["Pipeline"])
-def get_result(document_id: str):
-    """Возвращает итоговый словарь и карту транслитерации."""
+def get_result(
+    document_id: str,
+    target: str,
+    limit: int = 100,
+    offset: int = 0,
+):
+    if target not in ("abbr", "term", "transliteration"):
+        raise HTTPException(status_code=400, detail="target должен быть 'abbr', 'term' или 'transliteration'")
+
     db = SessionLocal()
     try:
         doc = db.query(Document).filter_by(filename=document_id).first()
@@ -269,13 +281,34 @@ def get_result(document_id: str):
         if doc.status != "completed":
             raise HTTPException(status_code=425, detail=f"Документ ещё не готов (статус: {doc.status})")
 
-        fd = doc.final_dictionary or {}
-        return {
+        if target in ("abbr", "term"):
+            data = dict(
+                db.query(ExtractedItem.word, ExtractedItem.definition)
+                .join(Chunk)
+                .filter(
+                    Chunk.doc_id == doc.id,
+                    ExtractedItem.item_type == target,
+                    ExtractedItem.is_final == True,
+                )
+                .offset(offset).limit(limit)
+                .all()
+            )
+        else:  # transliteration
+            data = dict(
+                db.query(TransliterationEntry.ru_variant, TransliterationEntry.abbr)
+                .filter_by(doc_id=doc.id)
+                .offset(offset).limit(limit)
+                .all()
+            )
+
+        return UnicodeJSONResponse({
             "document_id": document_id,
-            "terms": fd.get("terms", {}),
-            "abbrs": fd.get("abbrs", {}),
-            "transliteration": fd.get("transliteration", {}),
-        }
+            "target": target,
+            "offset": offset,
+            "limit": limit,
+            "count": len(data),
+            "data": data,
+        })
     finally:
         db.close()
 

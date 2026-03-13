@@ -2,6 +2,7 @@ import asyncio
 import json
 import yaml
 import aiohttp
+import re
 
 from collections import defaultdict
 from typing import Literal
@@ -10,10 +11,15 @@ from celery import Celery
 from celery.utils.log import get_task_logger
 
 from src.extraction.model_client import get_llm_client, parse_llm_definition_response
-from src.extraction.regex_detector import clean_abbr_list, clean_terms_list
+from src.extraction.regex_detector import clean_abbr_list, clean_terms_list, verify_expansion
 from src.dataset_builder.transliteration import build_transliteration_map
 from src.utils.db import SessionLocal
-from src.utils.models import Document, Chunk, ExtractedItem
+from src.utils.models import Document, Chunk, ExtractedItem, TransliterationEntry
+
+from sqlalchemy.orm.attributes import flag_modified
+from sqlalchemy import text, update
+
+BATCH_SIZE = 10
 
 logger = get_task_logger(__name__)
 
@@ -46,50 +52,68 @@ _DEFINE_PROMPT_KEY = {"term": "term", "abbr": "abbr"}
 _SEARCH_DONE_FLAG = {"term": "term_search_done", "abbr": "abbr_search_done"}
 _DEFS_DONE_FLAG = {"term": "term_defs_done", "abbr": "abbr_defs_done"}
 _CONFLICTS_DONE_FLAG = {"term": "term_conflicts_done", "abbr": "abbr_conflicts_done"}
-_DICT_KEY = {"term": "terms", "abbr": "abbrs"}
 
 
 # ---------------------------------------------------------------------------
 # Stage 1-2: Поиск сущностей в чанках
 # ---------------------------------------------------------------------------
 
-async def _search_all_chunks(chunks: list, item_type: ItemType) -> list[tuple[int, list[str]]]:
+async def _search_all_chunks_streaming(chunks: list, item_type: ItemType) -> None:
     stage = _SEARCH_STAGE[item_type]
     instructions = config["llm"][stage]["instructions"]
     model = get_llm_client()
-    timeout = aiohttp.ClientTimeout(total=40)
+    sem = asyncio.Semaphore(1)
+    buffer: list[ExtractedItem] = []
+    lock = asyncio.Lock()
 
-    async def search_chunk(session: aiohttp.ClientSession, chunk) -> tuple[int, list[str]]:
+    async def flush():
+        if not buffer:
+            return
+        db = SessionLocal()
         try:
-            raw = await model.generate_async(
-                session, f"{instructions}\n{chunk.text}", stage=stage
-            )
-        except Exception as e:
-            logger.error(f"[search_chunk] chunk_id={chunk.id}, item_type={item_type}: {e}")
-            return chunk.id, []
+            db.bulk_save_objects(buffer.copy())
+            db.commit()
+            logger.info(f"[streaming] Сохранён батч: {len(buffer)} сущностей типа {item_type}")
+        finally:
+            db.close()
+        buffer.clear()
 
-        # ── ДЕБАГов ──
-        logger.debug(f"[search_chunk] chunk_id={chunk.id} item_type={item_type} | RAW LLM response: {repr(raw)}")
+    async def process(session: aiohttp.ClientSession, chunk) -> None:
+        async with sem:
+            try:
+                raw = await model.generate_async(
+                    session, f"{instructions}\n{chunk.text}", stage=stage
+                )
+            except Exception as e:
+                logger.error(f"[streaming] chunk_id={chunk.id}: {e}")
+                return
 
-        if not raw:
-            logger.warning(f"[search_chunk] Пустой ответ LLM для chunk_id={chunk.id}, item_type={item_type}")
-            return chunk.id, []
+            if not raw:
+                return
 
-        if item_type == "term":
-            cleaned = clean_terms_list(chunk.text, raw)
-        else:
-            cleaned = clean_abbr_list(chunk.text, raw)
+            cleaned = clean_terms_list(chunk.text, raw) if item_type == "term" else clean_abbr_list(chunk.text, raw)
+            logger.info(f"[streaming] chunk_id={chunk.id} item_type={item_type} | После clean: {cleaned} (всего: {len(cleaned)})")
 
-        logger.info(f"[search_chunk] chunk_id={chunk.id} item_type={item_type} | "
-                    f"После clean: {cleaned} (всего: {len(cleaned)})")
+            if not cleaned:
+                return
 
-        return chunk.id, cleaned
+            async with lock:
+                buffer.extend([
+                    ExtractedItem(chunk_id=chunk.id, item_type=item_type, word=w)
+                    for w in cleaned
+                ])
+                if len(buffer) >= BATCH_SIZE:
+                    await flush()
 
     connector = aiohttp.TCPConnector(limit=10)
-    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-        results = await asyncio.gather(*[search_chunk(session, c) for c in chunks])
+    async with aiohttp.ClientSession(
+        connector=connector,
+        timeout=aiohttp.ClientTimeout(total=40)
+    ) as session:
+        await asyncio.gather(*[process(session, c) for c in chunks])
+        async with lock:
+            await flush()  # дописываем остаток
 
-    return list(results)
 
 
 # ---------------------------------------------------------------------------
@@ -122,15 +146,19 @@ async def _fetch_definitions(
         ]
         raw_results = await asyncio.gather(*tasks)
 
-    for (item_id, word, _), raw_res in zip(items_with_context, raw_results):
+    for (item_id, word, chunk_text), raw_res in zip(items_with_context, raw_results):
         if not raw_res:
             continue
         valid_def = parse_llm_definition_response(raw_res)
         if not valid_def:
             continue
-        # Для терминов фильтруем тавтологичные определения
-        if item_type == "term" and word in valid_def:
+
+        if item_type == "abbr" and not verify_expansion(abbr=word, expansion=valid_def, chunk_text=chunk_text):
             continue
+
+        if word in valid_def or (item_type == "abbr" and re.search(rf"^{re.escape(word)}\s*[-—–]", valid_def)):
+            continue
+
         results[item_id] = valid_def
 
     return results
@@ -144,7 +172,6 @@ async def _resolve_conflicts(
     conflicts: dict[str, list[str]],
     item_type: ItemType,
 ) -> dict[str, str]:
-    """Параллельно разрешает конфликты через LLM. Возвращает {слово: итоговое_определение}."""
     if not conflicts:
         return {}
 
@@ -152,20 +179,21 @@ async def _resolve_conflicts(
     instructions = config["llm"][stage]["instructions"]
     model = get_llm_client()
     keys = list(conflicts.keys())
+    sem = asyncio.Semaphore(1)
 
-    connector = aiohttp.TCPConnector(limit=10)
-    async with aiohttp.ClientSession(connector=connector) as session:
-        tasks = [
-            model.generate_async(
+    async def resolve_one(session, word):
+        async with sem:
+            return await model.generate_async(
                 session,
                 instructions.replace("{ENTITY}", word).replace(
                     "{VARIANTS}", json.dumps(conflicts[word], ensure_ascii=False)
                 ),
                 stage=stage,
             )
-            for word in keys
-        ]
-        raw_results = await asyncio.gather(*tasks)
+
+    connector = aiohttp.TCPConnector(limit=20)
+    async with aiohttp.ClientSession(connector=connector) as session:
+        raw_results = await asyncio.gather(*[resolve_one(session, w) for w in keys])
 
     resolved: dict[str, str] = {}
     for word, raw_res in zip(keys, raw_results):
@@ -189,59 +217,57 @@ async def _resolve_conflicts(
 # Общие Celery-таски
 # ---------------------------------------------------------------------------
 
-def _bulk_extract(doc_id: int, item_type: ItemType) -> None:
-    search_done_flag = _SEARCH_DONE_FLAG[item_type]
+def _bulk_extract_batch(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> None:
     db = SessionLocal()
     try:
-        doc = db.query(Document).get(doc_id)
-        if not doc:
-            logger.error(f"[bulk_extract] Документ {doc_id} не найден")
-            return
-        if getattr(doc, search_done_flag):
-            logger.info(f"[bulk_extract] doc_id={doc_id} уже обработан ({search_done_flag}=True)")
-            return
-
-        chunks = db.query(Chunk).filter_by(doc_id=doc_id).all()
-        logger.info(f"[bulk_extract] doc_id={doc_id}, item_type={item_type}, чанков={len(chunks)}")
-
+        chunks = db.query(Chunk).filter(Chunk.id.in_(chunk_ids)).all()
         if not chunks:
             return
 
-        chunk_results = _run_async(_search_all_chunks(chunks, item_type))
+        _run_async(_search_all_chunks_streaming(chunks, item_type))
 
-        items_to_save = [
-            ExtractedItem(chunk_id=chunk_id, item_type=item_type, word=word)
-            for chunk_id, words in chunk_results
-            for word in words
-        ]
-
-        logger.info(f"[bulk_extract] Итого к сохранению: {len(items_to_save)} сущностей типа {item_type}")
-
-        if items_to_save:
-            db.bulk_save_objects(items_to_save)
-
-        setattr(doc, search_done_flag, True)
+        # Атомарно инкрементируем счётчик готовых батчей
+        db.execute(
+            update(Document)
+            .where(Document.id == doc_id)
+            .values(**{f"{item_type}_batches_done": Document.__table__.c[f"{item_type}_batches_done"] + 1})
+        )
         db.commit()
-        logger.info(f"[bulk_extract] {search_done_flag}=True сохранён для doc_id={doc_id}")
 
-        if item_type == "term":
-            bulk_define_terms.delay(doc_id)
-        else:
-            bulk_define_abbrs.delay(doc_id)
+        # Проверяем — все ли батчи завершены
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        batches_done = getattr(doc, f"{item_type}_batches_done")
+        batches_total = getattr(doc, f"{item_type}_batches_total")
+
+        logger.info(f"[bulk_extract_batch] doc_id={doc_id} item_type={item_type} | батч {batches_done}/{batches_total}")
+
+        if batches_done >= batches_total:
+            search_done_flag = _SEARCH_DONE_FLAG[item_type]
+            doc = db.query(Document).filter(Document.id == doc_id).with_for_update().first()
+            setattr(doc, search_done_flag, True)
+            db.commit()
+            logger.info(f"[bulk_extract_batch] {search_done_flag}=True для doc_id={doc_id}")
+
+            if item_type == "term":
+                bulk_define_terms.delay(doc_id)
+            else:
+                bulk_define_abbrs.delay(doc_id)
 
     except Exception as e:
-        logger.error(f"[bulk_extract] Критическая ошибка doc_id={doc_id}: {e}", exc_info=True)
+        logger.error(f"[bulk_extract_batch] Критическая ошибка doc_id={doc_id}: {e}", exc_info=True)
         db.rollback()
         raise
     finally:
         db.close()
+
+
 
 def _bulk_define(doc_id: int, item_type: ItemType) -> None:
     search_done_flag = _SEARCH_DONE_FLAG[item_type]
     defs_done_flag = _DEFS_DONE_FLAG[item_type]
     db = SessionLocal()
     try:
-        doc = db.query(Document).get(doc_id)
+        doc = db.query(Document).filter(Document.id == doc_id).first()
         if not doc or not getattr(doc, search_done_flag) or getattr(doc, defs_done_flag):
             return
 
@@ -281,11 +307,16 @@ def _bulk_define(doc_id: int, item_type: ItemType) -> None:
 def _resolve_conflicts_task(doc_id: int, item_type: ItemType) -> None:
     defs_done_flag = _DEFS_DONE_FLAG[item_type]
     conflicts_done_flag = _CONFLICTS_DONE_FLAG[item_type]
-    dict_key = _DICT_KEY[item_type]
     db = SessionLocal()
     try:
-        doc = db.query(Document).get(doc_id)
-        if not doc or not getattr(doc, defs_done_flag) or getattr(doc, conflicts_done_flag):
+        db.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+
+        if not doc:
+            return
+        if not getattr(doc, defs_done_flag):
+            raise RuntimeError(f"{defs_done_flag} not ready yet")
+        if getattr(doc, conflicts_done_flag):
             return
 
         items = (
@@ -315,18 +346,34 @@ def _resolve_conflicts_task(doc_id: int, item_type: ItemType) -> None:
             resolved = _run_async(_resolve_conflicts(conflicts, item_type))
             final.update(resolved)
 
-        fd = doc.final_dictionary or {}
-        fd[dict_key] = final
-        doc.final_dictionary = fd
+        doc = db.query(Document).filter(Document.id == doc_id).with_for_update().first()
+
+        for word, definition in final.items():
+            subq = (
+                db.query(ExtractedItem.id)
+                .join(Chunk)
+                .filter(
+                    Chunk.doc_id == doc_id,
+                    ExtractedItem.item_type == item_type,
+                    ExtractedItem.word == word,
+                )
+                .limit(1)
+                .scalar_subquery()
+            )
+            db.query(ExtractedItem).filter(
+                ExtractedItem.id == subq
+            ).update(
+                {"definition": definition, "is_final": True},
+                synchronize_session=False,
+            )
 
         setattr(doc, conflicts_done_flag, True)
         db.commit()
 
-        doc_refreshed = db.query(Document).get(doc_id)
+        doc_refreshed = db.query(Document).filter(Document.id == doc_id).first()
         if doc_refreshed.term_conflicts_done and doc_refreshed.abbr_conflicts_done:
             build_transliteration.delay(doc_id)
             logger.info(f"[resolve_conflicts_task] Запущена транслитерация для doc_id={doc_id}")
-
 
     except Exception as e:
         logger.error(f"[resolve_conflicts_task] Критическая ошибка doc_id={doc_id}: {e}")
@@ -335,10 +382,11 @@ def _resolve_conflicts_task(doc_id: int, item_type: ItemType) -> None:
     finally:
         db.close()
 
+
 def _build_transliteration(doc_id: int) -> None:
     db = SessionLocal()
     try:
-        doc = db.query(Document).get(doc_id)
+        doc = db.query(Document).filter(Document.id == doc_id).with_for_update().first()
         if not doc:
             logger.error(f"[build_transliteration] Документ {doc_id} не найден")
             return
@@ -347,8 +395,17 @@ def _build_transliteration(doc_id: int) -> None:
             logger.warning(f"[build_transliteration] Словарь ещё не готов для doc_id={doc_id}")
             return
 
-        fd = doc.final_dictionary or {}
-        abbreviations = fd.get("abbrs", {})
+        rows = (
+            db.query(ExtractedItem.word, ExtractedItem.definition)
+            .join(Chunk)
+            .filter(
+                Chunk.doc_id == doc_id,
+                ExtractedItem.item_type == "abbr",
+                ExtractedItem.is_final == True,
+            )
+            .all()
+        )
+        abbreviations = {word: definition for word, definition in rows}
 
         if not abbreviations:
             logger.info(f"[build_transliteration] Нет аббревиатур для транслитерации, doc_id={doc_id}")
@@ -356,11 +413,16 @@ def _build_transliteration(doc_id: int) -> None:
             db.commit()
             return
 
-        translit_map = build_transliteration_map(abbreviations, max_abbr_len=max_abbr_len)
+        translit_map = build_transliteration_map(abbreviations, 5)
         logger.info(f"[build_transliteration] Построено {len(translit_map)} вариантов для doc_id={doc_id}")
 
-        fd["transliteration"] = translit_map
-        doc.final_dictionary = fd
+        # Сохраняем в отдельную таблицу
+        db.query(TransliterationEntry).filter_by(doc_id=doc_id).delete()
+        db.bulk_save_objects([
+            TransliterationEntry(doc_id=doc_id, ru_variant=ru, abbr=abbr)
+            for ru, abbr in translit_map.items()
+        ])
+
         doc.status = "completed"
         db.commit()
 
@@ -376,14 +438,14 @@ def _build_transliteration(doc_id: int) -> None:
 # Публичные Celery-таски (вызываются через .delay())
 # ---------------------------------------------------------------------------
 
-@app.task(name="tasks.bulk_extract_terms")
-def bulk_extract_terms(doc_id: int) -> None:
-    _bulk_extract(doc_id, "term")
+@app.task(name="tasks.bulk_extract_terms_batch")
+def bulk_extract_terms_batch(doc_id: int, chunk_ids: list[int]) -> None:
+    _bulk_extract_batch(doc_id, chunk_ids, "term")
 
 
-@app.task(name="tasks.bulk_extract_abbrs")
-def bulk_extract_abbrs(doc_id: int) -> None:
-    _bulk_extract(doc_id, "abbr")
+@app.task(name="tasks.bulk_extract_abbrs_batch")
+def bulk_extract_abbrs_batch(doc_id: int, chunk_ids: list[int]) -> None:
+    _bulk_extract_batch(doc_id, chunk_ids, "abbr")
 
 
 @app.task(name="tasks.bulk_define_terms")
@@ -409,3 +471,11 @@ def resolve_abbr_conflicts(doc_id: int) -> None:
 @app.task(name="tasks.build_transliteration")
 def build_transliteration(doc_id: int) -> None:
     _build_transliteration(doc_id)
+
+@app.task(name="tasks.bulk_extract_terms_batch")
+def bulk_extract_terms_batch(doc_id: int, chunk_ids: list[int]) -> None:
+    _bulk_extract_batch(doc_id, chunk_ids, "term")
+
+@app.task(name="tasks.bulk_extract_abbrs_batch")
+def bulk_extract_abbrs_batch(doc_id: int, chunk_ids: list[int]) -> None:
+    _bulk_extract_batch(doc_id, chunk_ids, "abbr")

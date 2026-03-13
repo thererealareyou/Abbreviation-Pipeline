@@ -1,16 +1,15 @@
 import requests
 import time
 import json
-import os
 
 from src.extraction.pdf_parser import extract_fixed_from_excel
 
 BASE_URL = "http://127.0.0.1:8000"
 DOC_ID = "integration_test_doc.txt"
-POLL_INTERVAL = 3       # секунд между опросами статуса
-POLL_TIMEOUT = 600      # максимальное время ожидания в секундах
+POLL_INTERVAL = 3
+POLL_TIMEOUT = 600
 
-TEST_TEXTS = extract_fixed_from_excel("data/02_interim/sent_abbr_term_old.xlsx", "chunk", 30)
+TEST_TEXTS = extract_fixed_from_excel("data/02_interim/sent_abbr_term_old.xlsx", "chunk", 50)
 
 
 def print_step(step_name: str) -> None:
@@ -114,17 +113,6 @@ def print_stats() -> None:
     print(json.dumps(stats, indent=2, ensure_ascii=False))
 
 
-def print_final_dictionary() -> None:
-    print_step("Финальный словарь из БД")
-    result_file = f"data/processed/{DOC_ID}.json"
-    if os.path.exists(result_file):
-        with open(result_file, "r", encoding="utf-8") as f:
-            dictionary = json.load(f)
-        print(json.dumps(dictionary, indent=2, ensure_ascii=False))
-    else:
-        print("Файл словаря не найден. Проверьте сохранение в tasks.py.")
-
-
 def test_pipeline() -> None:
     try:
         check_health()
@@ -138,7 +126,6 @@ def test_pipeline() -> None:
 
         build_dictionary()
         print_stats()
-        print_final_dictionary()
 
     except requests.exceptions.ConnectionError:
         print("Ошибка: FastAPI сервер не запущен. Запустите его командой: uvicorn src.api:app --reload")

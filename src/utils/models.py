@@ -20,7 +20,10 @@ class Document(Base):
     term_conflicts_done = Column(Boolean, default=False, nullable=False)
     abbr_conflicts_done = Column(Boolean, default=False, nullable=False)
 
-    final_dictionary = Column(JSON, nullable=True)
+    term_batches_total = Column(Integer, server_default="0", nullable=False)
+    term_batches_done = Column(Integer, server_default="0", nullable=False)
+    abbr_batches_total = Column(Integer, server_default="0", nullable=False)
+    abbr_batches_done = Column(Integer, server_default="0", nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -32,6 +35,18 @@ class Document(Base):
             "status IN ('processing', 'resolving_conflicts', 'completed', 'error')",
             name="ck_document_status",
         ),
+    )
+
+
+class TransliterationEntry(Base):
+    __tablename__ = "transliteration_entries"
+    id = Column(Integer, primary_key=True)
+    doc_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"))
+    ru_variant = Column(String, index=True, nullable=False)
+    abbr = Column(String, nullable=False)
+
+    __table_args__ = (
+        Index("ix_translit_doc_ru", "doc_id", "ru_variant"),
     )
 
 
@@ -60,6 +75,7 @@ class ExtractedItem(Base):
     item_type = Column(String, nullable=False)
     word = Column(String, index=True, nullable=False)
     definition = Column(Text, nullable=True)
+    is_final = Column(Boolean, default=False, nullable=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
