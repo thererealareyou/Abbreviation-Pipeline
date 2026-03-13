@@ -1,4 +1,5 @@
 import re
+import pandas as pd
 import pdfplumber
 from pathlib import Path
 from src.utils.logger import PipelineLogger
@@ -138,3 +139,38 @@ def extract_sentences_from_folder(
             logger.error(f"{pdf_path.name}: {e}")
 
     return all_windows
+
+def extract_fixed_from_excel(file_path: str, column_name: str = 'chunk', n_sentences: int = 5) -> list:
+    """
+    Извлекает первые N предложений из каждой ячейки указанной колонки Excel-файла.
+
+    Параметры:
+        file_path (str): путь к Excel-файлу.
+        column_name (str): имя колонки с текстом (по умолчанию 'chunk').
+        n_sentences (int): количество предложений, которое нужно взять из каждой ячейки.
+
+    Возвращает:
+        list: список строк, где каждый элемент — первые N предложений из соответствующей ячейки.
+              Если в ячейке меньше предложений, возвращается весь текст.
+    """
+    try:
+        df = pd.read_excel(file_path, engine='openpyxl')
+    except FileNotFoundError:
+        raise FileNotFoundError(f"Файл {file_path} не найден.")
+    except Exception as e:
+        raise Exception(f"Ошибка при чтении файла: {e}")
+
+    if column_name not in df.columns:
+        raise KeyError(f"В файле отсутствует колонка '{column_name}'.")
+
+    result = []
+    for cell in df[column_name][:n_sentences]:
+        if pd.isna(cell) or not isinstance(cell, str):
+            result.append("")
+            continue
+
+        sentences = re.split(r'(?<=[.!?])\s+', cell.strip())
+        first_n = sentences[:n_sentences]
+        result.append(' '.join(first_n))
+
+    return result

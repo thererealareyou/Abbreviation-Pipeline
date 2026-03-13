@@ -44,7 +44,7 @@ class AsyncAPIModelClient:
         """
 
         messages = [
-            {"role": "system", "content": config["llm"][stage]["role_prompt"]},
+            {"role": "system", "content": config['llm'][stage]['role_prompt']},
             {"role": "user", "content": prompt}
         ]
 
@@ -85,8 +85,8 @@ def get_llm_client():
 
     return AsyncAPIModelClient(
         url=config["llm"]["api"]["url"],
-        temperature=config["llm"]["temperature"],
-        max_parallel=8
+        temperature=config["llm"]["api"]["temperature"],
+        max_parallel=config["llm"]["api"]["max_parallel"]
     )
 
 
