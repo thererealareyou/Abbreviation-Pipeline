@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+
 import yaml
 import aiohttp
 import re
@@ -12,21 +14,25 @@ from celery.utils.log import get_task_logger
 
 from src.extraction.model_client import get_llm_client, parse_llm_definition_response
 from src.extraction.regex_detector import clean_abbr_list, clean_terms_list, verify_expansion
-from src.dataset_builder.transliteration import build_transliteration_map
-from src.utils.db import SessionLocal
-from src.utils.models import Document, Chunk, ExtractedItem, TransliterationEntry
+from src.extraction.transliteration import build_transliteration_map
+from src.backend.db import SessionLocal
+from src.backend.models import Document, Chunk, ExtractedItem, TransliterationEntry
 
-from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy import text, update
 
 BATCH_SIZE = 10
 
 logger = get_task_logger(__name__)
 
-app = Celery("nlp_pipeline", broker="pyamqp://guest:guest@localhost:5672//")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "pyamqp://guest:guest@localhost:5672//")
+
+app = Celery("nlp_pipeline", broker=CELERY_BROKER_URL)
 
 with open("config/settings.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
+
+if os.getenv("LLM_API_URL"):
+    config["llm"]["api"]["url"] = os.getenv("LLM_API_URL")
 
 ItemType = Literal["term", "abbr"]
 
@@ -53,32 +59,36 @@ _SEARCH_DONE_FLAG = {"term": "term_search_done", "abbr": "abbr_search_done"}
 _DEFS_DONE_FLAG = {"term": "term_defs_done", "abbr": "abbr_defs_done"}
 _CONFLICTS_DONE_FLAG = {"term": "term_conflicts_done", "abbr": "abbr_conflicts_done"}
 
-
 # ---------------------------------------------------------------------------
 # Stage 1-2: Поиск сущностей в чанках
 # ---------------------------------------------------------------------------
 
-async def _search_all_chunks_streaming(chunks: list, item_type: ItemType) -> None:
+async def _search_all_chunks_streaming(chunks: list, item_type: ItemType, doc_id: int) -> None:
     stage = _SEARCH_STAGE[item_type]
     instructions = config["llm"][stage]["instructions"]
     model = get_llm_client()
     sem = asyncio.Semaphore(1)
     buffer: list[ExtractedItem] = []
+    chunks_in_batch = 0
     lock = asyncio.Lock()
 
-    async def flush():
-        if not buffer:
-            return
+    async def flush(items: list, chunks_count: int) -> None:
         db = SessionLocal()
         try:
-            db.bulk_save_objects(buffer.copy())
+            if items:
+                db.bulk_save_objects(items)
+            db.execute(
+                update(Document)
+                .where(Document.id == doc_id)
+                .values(
+                    **{f"finding_{item_type}_chunks": getattr(Document, f"finding_{item_type}_chunks") + chunks_count})
+            )
             db.commit()
-            logger.info(f"[streaming] Сохранён батч: {len(buffer)} сущностей типа {item_type}")
         finally:
             db.close()
-        buffer.clear()
 
     async def process(session: aiohttp.ClientSession, chunk) -> None:
+        nonlocal chunks_in_batch
         async with sem:
             try:
                 raw = await model.generate_async(
@@ -92,18 +102,22 @@ async def _search_all_chunks_streaming(chunks: list, item_type: ItemType) -> Non
                 return
 
             cleaned = clean_terms_list(chunk.text, raw) if item_type == "term" else clean_abbr_list(chunk.text, raw)
-            logger.info(f"[streaming] chunk_id={chunk.id} item_type={item_type} | После clean: {cleaned} (всего: {len(cleaned)})")
-
-            if not cleaned:
-                return
+            logger.info(
+                f"[streaming] chunk_id={chunk.id} item_type={item_type} | После clean: {cleaned} (всего: {len(cleaned)})")
 
             async with lock:
-                buffer.extend([
-                    ExtractedItem(chunk_id=chunk.id, item_type=item_type, word=w)
-                    for w in cleaned
-                ])
-                if len(buffer) >= BATCH_SIZE:
-                    await flush()
+                chunks_in_batch += 1
+
+                if cleaned:
+                    buffer.extend([
+                        ExtractedItem(chunk_id=chunk.id, item_type=item_type, word=w)
+                        for w in cleaned
+                    ])
+
+                if len(buffer) >= BATCH_SIZE or (not cleaned and chunks_in_batch % BATCH_SIZE == 0):
+                    await flush(buffer.copy(), chunks_in_batch)
+                    buffer.clear()
+                    chunks_in_batch = 0
 
     connector = aiohttp.TCPConnector(limit=10)
     async with aiohttp.ClientSession(
@@ -112,9 +126,8 @@ async def _search_all_chunks_streaming(chunks: list, item_type: ItemType) -> Non
     ) as session:
         await asyncio.gather(*[process(session, c) for c in chunks])
         async with lock:
-            await flush()  # дописываем остаток
-
-
+            await flush(buffer.copy(), chunks_in_batch)
+            buffer.clear()
 
 # ---------------------------------------------------------------------------
 # Stage 3-4: Поиск определений
@@ -123,6 +136,7 @@ async def _search_all_chunks_streaming(chunks: list, item_type: ItemType) -> Non
 async def _fetch_definitions(
     items_with_context: list[tuple[int, str, str]],
     item_type: ItemType,
+    doc_id: int,
 ) -> dict[int, str]:
     """Параллельно ищет определения. Возвращает {item_id: определение}."""
     if not items_with_context:
@@ -159,10 +173,23 @@ async def _fetch_definitions(
         if word in valid_def or (item_type == "abbr" and re.search(rf"^{re.escape(word)}\s*[-—–]", valid_def)):
             continue
 
-        results[item_id] = valid_def
+        logger.info(f"[_bulk_define] doc_id={doc_id} item_type={item_type} | Определение для \"{word}\": {valid_def}")
+        results[item_id] = valid_def[:1].upper() + valid_def[1:]
+
+    if results:
+        db = SessionLocal()
+        try:
+            db.execute(
+                update(Document)
+                .where(Document.id == doc_id)
+                .values(
+                    **{f"defining_{item_type}s": getattr(Document, f"defining_{item_type}s") + len(items_with_context)})
+            )
+            db.commit()
+        finally:
+            db.close()
 
     return results
-
 
 # ---------------------------------------------------------------------------
 # Stage 5-6: Разрешение конфликтов
@@ -212,7 +239,6 @@ async def _resolve_conflicts(
 
     return resolved
 
-
 # ---------------------------------------------------------------------------
 # Общие Celery-таски
 # ---------------------------------------------------------------------------
@@ -224,9 +250,8 @@ def _bulk_extract_batch(doc_id: int, chunk_ids: list[int], item_type: ItemType) 
         if not chunks:
             return
 
-        _run_async(_search_all_chunks_streaming(chunks, item_type))
+        _run_async(_search_all_chunks_streaming(chunks, item_type, doc_id))
 
-        # Атомарно инкрементируем счётчик готовых батчей
         db.execute(
             update(Document)
             .where(Document.id == doc_id)
@@ -234,7 +259,6 @@ def _bulk_extract_batch(doc_id: int, chunk_ids: list[int], item_type: ItemType) 
         )
         db.commit()
 
-        # Проверяем — все ли батчи завершены
         doc = db.query(Document).filter(Document.id == doc_id).first()
         batches_done = getattr(doc, f"{item_type}_batches_done")
         batches_total = getattr(doc, f"{item_type}_batches_total")
@@ -260,8 +284,6 @@ def _bulk_extract_batch(doc_id: int, chunk_ids: list[int], item_type: ItemType) 
     finally:
         db.close()
 
-
-
 def _bulk_define(doc_id: int, item_type: ItemType) -> None:
     search_done_flag = _SEARCH_DONE_FLAG[item_type]
     defs_done_flag = _DEFS_DONE_FLAG[item_type]
@@ -283,7 +305,7 @@ def _bulk_define(doc_id: int, item_type: ItemType) -> None:
         )
 
         context_list = [(item.id, item.word, text) for item, text in rows]
-        definitions = _run_async(_fetch_definitions(context_list, item_type))
+        definitions = _run_async(_fetch_definitions(context_list, item_type, doc_id))
 
         for item, _ in rows:
             if item.id in definitions:
@@ -341,6 +363,13 @@ def _resolve_conflicts_task(doc_id: int, item_type: ItemType) -> None:
                 final[word] = next(iter(defs))
             else:
                 conflicts[word] = list(defs)
+
+        db.execute(
+            update(Document)
+            .where(Document.id == doc_id)
+            .values(**{f"total_{item_type}_conflicts": len(conflicts)})
+        )
+        db.commit()
 
         if conflicts:
             resolved = _run_async(_resolve_conflicts(conflicts, item_type))
@@ -416,7 +445,6 @@ def _build_transliteration(doc_id: int) -> None:
         translit_map = build_transliteration_map(abbreviations, 5)
         logger.info(f"[build_transliteration] Построено {len(translit_map)} вариантов для doc_id={doc_id}")
 
-        # Сохраняем в отдельную таблицу
         db.query(TransliterationEntry).filter_by(doc_id=doc_id).delete()
         db.bulk_save_objects([
             TransliterationEntry(doc_id=doc_id, ru_variant=ru, abbr=abbr)
@@ -432,7 +460,6 @@ def _build_transliteration(doc_id: int) -> None:
         raise
     finally:
         db.close()
-
 
 # ---------------------------------------------------------------------------
 # Публичные Celery-таски (вызываются через .delay())
@@ -471,11 +498,3 @@ def resolve_abbr_conflicts(doc_id: int) -> None:
 @app.task(name="tasks.build_transliteration")
 def build_transliteration(doc_id: int) -> None:
     _build_transliteration(doc_id)
-
-@app.task(name="tasks.bulk_extract_terms_batch")
-def bulk_extract_terms_batch(doc_id: int, chunk_ids: list[int]) -> None:
-    _bulk_extract_batch(doc_id, chunk_ids, "term")
-
-@app.task(name="tasks.bulk_extract_abbrs_batch")
-def bulk_extract_abbrs_batch(doc_id: int, chunk_ids: list[int]) -> None:
-    _bulk_extract_batch(doc_id, chunk_ids, "abbr")

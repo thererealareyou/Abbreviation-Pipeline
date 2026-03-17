@@ -20,6 +20,18 @@ class Document(Base):
     term_conflicts_done = Column(Boolean, default=False, nullable=False)
     abbr_conflicts_done = Column(Boolean, default=False, nullable=False)
 
+    # Прогресс поиска
+    finding_abbr_chunks = Column(Integer, server_default="0", nullable=False)
+    finding_term_chunks = Column(Integer, server_default="0", nullable=False)
+
+    # Прогресс определений
+    defining_abbrs = Column(Integer, server_default="0", nullable=False)
+    defining_terms = Column(Integer, server_default="0", nullable=False)
+
+    # Конфликты
+    total_abbr_conflicts = Column(Integer, server_default="0", nullable=False)
+    total_term_conflicts = Column(Integer, server_default="0", nullable=False)
+
     term_batches_total = Column(Integer, server_default="0", nullable=False)
     term_batches_done = Column(Integer, server_default="0", nullable=False)
     abbr_batches_total = Column(Integer, server_default="0", nullable=False)

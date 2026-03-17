@@ -1,9 +1,10 @@
 import json
+import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from src.utils.models import Base
+from src.backend.models import Base
 
-DATABASE_URL = "postgresql://postgres:postgres@localhost:5432/nlp_db"
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/nlp_db")
 
 def _json_serializer(obj):
     return json.dumps(obj, ensure_ascii=False)

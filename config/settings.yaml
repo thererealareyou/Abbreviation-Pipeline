@@ -1,25 +1,3 @@
-paths:
-  raw_data:       # Stage 0 | Сырые данные должны лежать в folder.
-    folder: "data/01_raw"
-
-  interim_data:   # Stage 1 | Промежуточные данные (для удобства чтения в xlsx).
-    folder: "data/02_interim"
-    sentences_xlsx: "sent_abbr_term.xlsx"
-
-  validation:     # Stage 2 | Термины и аббревиатуры с конфликтами (несколькими значениями на один элемент).
-    folder: "data/03_validation"
-    gloss_json: "glossary.json" # Аббревиатуры и термины
-    extended_json: "extended_info.json" # Аббревиатуры, термины, предложения, расшифровки и дропнутые данные.
-
-  processed:      # Stage 3-4 | Разрешение конфликтов и построение ru-2-eng фраз.
-    folder: "data/04_processed"
-    final_gloss_json: "final_glossary.json" # Глоссарий без конфликтов
-    eng_to_ru_json: "variation_glossary.json" # ru-2-eng-словарь.
-
-db:
-  name: "chunks.db"
-  table_name: "chunk_table"
-
 llm:
   finding_abbr: # Промпт для получения аббревиатур.
     role_prompt: >
@@ -168,13 +146,7 @@ llm:
       ФОРМАТ ОТВЕТА (строго JSON):
       {{"resolved_definition": "Итоговое смысловое определение"}}
 
-
   api:
     url: "http://127.0.0.1:8080"
     max_parallel: 8 # Ставить в соответствии с -np в .bat!
     temperature: 0.0
-
-p.s.: >
-  Вследствие невозможности (на текущий момент) поставить llama-cpp-python на 3.13.x, код предназначен для запуска 
-  llama-cpp отдельно. С восемью параллельными сессиями на 4050 Laptop 6GB модель t-lite-it-1.0 инферинсится 
-  со скоростью примерно 30t/s. Рекомендуемые параметры указаны в .bat-файле.
