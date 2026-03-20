@@ -17,13 +17,7 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
-    """Пересоздает все таблицы в базе данных на основе models.py"""
-    print("Удаляем старые таблицы...")
-    Base.metadata.drop_all(bind=engine)
-
-    print("Создаем новые таблицы с обновленной схемой...")
+    """Создаёт таблицы, если они ещё не существуют."""
+    print("Проверяем и создаём таблицы, если их нет...")
     Base.metadata.create_all(bind=engine)
     print("Готово!")
-
-if __name__ == "__main__":
-    init_db()

@@ -1,3 +1,4 @@
+import os
 import time
 import random
 import yaml
@@ -10,7 +11,7 @@ from sqlalchemy import text
 from pydantic import BaseModel
 from typing import List
 
-from src.backend.db import SessionLocal
+from src.backend.db import SessionLocal, init_db
 from src.backend.models import Document, Chunk, ExtractedItem, TransliterationEntry
 from src.backend.tasks import bulk_extract_terms_batch, bulk_extract_abbrs_batch
 
@@ -28,6 +29,7 @@ with open("config/settings.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 app = FastAPI(title="Автоматический извлекатель доменных аббревиатур (АИДА)")
+init_db()
 
 CHUNK_BATCH = 100
 
@@ -68,7 +70,7 @@ async def check_health():
         db: статус подключения к базе данных ('ok' / 'error').
         llm: статус LLM-сервера ('ok' / 'busy' / 'unreachable').
     """
-    llm_url = config["llm"]["api"]["url"]
+    llm_url = os.getenv("LLM_API_URL")
 
     try:
         db = SessionLocal()

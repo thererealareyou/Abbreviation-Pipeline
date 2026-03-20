@@ -1,4 +1,6 @@
 import json
+import os
+
 import yaml
 import asyncio
 import aiohttp
@@ -81,9 +83,9 @@ def get_llm_client():
     """
 
     return AsyncAPIModelClient(
-        url=config["llm"]["api"]["url"],
-        temperature=config["llm"]["api"]["temperature"],
-        max_parallel=config["llm"]["api"]["max_parallel"]
+        url=os.getenv("LLM_API_URL"),
+        temperature=0.0,
+        max_parallel=8
     )
 
 def parse_llm_definition_response(response_text: str) -> str | None:

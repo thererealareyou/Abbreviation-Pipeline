@@ -24,15 +24,12 @@ BATCH_SIZE = 10
 
 logger = get_task_logger(__name__)
 
-CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "pyamqp://guest:guest@localhost:5672//")
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL")
 
 app = Celery("nlp_pipeline", broker=CELERY_BROKER_URL)
 
 with open("config/settings.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
-
-if os.getenv("LLM_API_URL"):
-    config["llm"]["api"]["url"] = os.getenv("LLM_API_URL")
 
 ItemType = Literal["term", "abbr"]
 
@@ -309,6 +306,7 @@ def _bulk_define(doc_id: int, item_type: ItemType) -> None:
 
         for item, _ in rows:
             if item.id in definitions:
+                logger.info(f"[bulk_define] item.id={item.id}, item={item}")
                 item.definition = definitions[item.id]
 
         setattr(doc, defs_done_flag, True)
