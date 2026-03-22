@@ -1,4 +1,6 @@
 import json
+import os
+
 import yaml
 import asyncio
 import aiohttp
@@ -10,9 +12,7 @@ with open("config/settings.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 class AsyncAPIModelClient:
-    """Асинхронный клиент для обращения к локальному серверу (llama.cpp server) батчами.
-    """
-
+    """Асинхронный клиент для обращения к локальному серверу (llama.cpp server) батчами."""
     def __init__(self, url: str, temperature: float, max_parallel: int) -> None:
         """
         Args:
@@ -44,7 +44,7 @@ class AsyncAPIModelClient:
         """
 
         messages = [
-            {"role": "system", "content": config["llm"][stage]["role_prompt"]},
+            {"role": "system", "content": config['llm'][stage]['role_prompt']},
             {"role": "user", "content": prompt}
         ]
 
@@ -74,7 +74,6 @@ class AsyncAPIModelClient:
                 logger.error(f"[Критическая ошибка aiohttp]: {e}")
                 return "[]"
 
-
 def get_llm_client():
     """Создает и возвращает настроенный экземпляр асинхронного клиента LLM.
 
@@ -84,11 +83,10 @@ def get_llm_client():
     """
 
     return AsyncAPIModelClient(
-        url=config["llm"]["api"]["url"],
-        temperature=config["llm"]["temperature"],
+        url=os.getenv("LLM_API_URL"),
+        temperature=0.0,
         max_parallel=8
     )
-
 
 def parse_llm_definition_response(response_text: str) -> str | None:
     """Парсит ответ LLM, извлекает expansion/definition, если has_definition == True. Возвращает строку или None.
@@ -111,6 +109,7 @@ def parse_llm_definition_response(response_text: str) -> str | None:
         has_def = data.get("has_definition")
         exp = data.get("expansion") or data.get("definition")
 
+        logger.info(f"{exp}")
         if has_def and exp:
             return exp.strip()
     except Exception:
