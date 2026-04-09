@@ -1,102 +1,114 @@
-from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, Text, JSON, DateTime, CheckConstraint, Index
-from sqlalchemy.orm import declarative_base, relationship
+import uuid
+from datetime import datetime
+from typing import Optional
+from sqlalchemy import DateTime, Boolean, text, String, ForeignKey, Text, CheckConstraint
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, relationship
 from sqlalchemy.sql import func
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
 
 
-class Document(Base):
+class MixinCore:
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+        index=True,
+        unique=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=func.now())
+    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+
+
+class Document(Base, MixinCore):
     __tablename__ = "documents"
 
-    id = Column(Integer, primary_key=True)
-    filename = Column(String, unique=True, index=True, nullable=False)
-    status = Column(String, default="processing", nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), index=True, nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(50), default="processing")
 
-    # Стадии пайплайна
-    term_search_done = Column(Boolean, default=False, nullable=False)
-    abbr_search_done = Column(Boolean, default=False, nullable=False)
-    term_defs_done = Column(Boolean, default=False, nullable=False)
-    abbr_defs_done = Column(Boolean, default=False, nullable=False)
-    term_conflicts_done = Column(Boolean, default=False, nullable=False)
-    abbr_conflicts_done = Column(Boolean, default=False, nullable=False)
+    # --- Стадии пайплайна (Mapped автоматически подхватит тип bool) ---
+    term_search_done: Mapped[bool] = mapped_column(default=False)
+    abbr_search_done: Mapped[bool] = mapped_column(default=False)
+    term_defs_done: Mapped[bool] = mapped_column(default=False)
+    abbr_defs_done: Mapped[bool] = mapped_column(default=False)
+    term_conflicts_done: Mapped[bool] = mapped_column(default=False)
+    abbr_conflicts_done: Mapped[bool] = mapped_column(default=False)
 
-    # Прогресс поиска
-    finding_abbr_chunks = Column(Integer, server_default="0", nullable=False)
-    finding_term_chunks = Column(Integer, server_default="0", nullable=False)
+    # --- Прогресс поиска ---
+    finding_abbr_chunks: Mapped[int] = mapped_column(server_default="0")
+    finding_term_chunks: Mapped[int] = mapped_column(server_default="0")
 
-    # Прогресс определений
-    defining_abbrs = Column(Integer, server_default="0", nullable=False)
-    defining_terms = Column(Integer, server_default="0", nullable=False)
+    # --- Прогресс определений ---
+    defining_abbrs: Mapped[int] = mapped_column(server_default="0")
+    defining_terms: Mapped[int] = mapped_column(server_default="0")
 
-    # Конфликты
-    total_abbr_conflicts = Column(Integer, server_default="0", nullable=False)
-    total_term_conflicts = Column(Integer, server_default="0", nullable=False)
+    # --- Конфликты ---
+    total_abbr_conflicts: Mapped[int] = mapped_column(server_default="0")
+    total_term_conflicts: Mapped[int] = mapped_column(server_default="0")
 
-    term_batches_total = Column(Integer, server_default="0", nullable=False)
-    term_batches_done = Column(Integer, server_default="0", nullable=False)
-    abbr_batches_total = Column(Integer, server_default="0", nullable=False)
-    abbr_batches_done = Column(Integer, server_default="0", nullable=False)
+    # --- Батчи ---
+    term_batches_total: Mapped[int] = mapped_column(server_default="0")
+    term_batches_done: Mapped[int] = mapped_column(server_default="0")
+    abbr_batches_total: Mapped[int] = mapped_column(server_default="0")
+    abbr_batches_done: Mapped[int] = mapped_column(server_default="0")
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
-
-    chunks = relationship("Chunk", back_populates="document", cascade="all, delete-orphan")
+    chunks: Mapped[list["Chunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('processing', 'resolving_conflicts', 'completed', 'error')",
+            "status IN ('processing', 'completed_term', 'completed_abbr', 'completed', 'error')",
             name="ck_document_status",
         ),
     )
 
 
-class TransliterationEntry(Base):
-    __tablename__ = "transliteration_entries"
-    id = Column(Integer, primary_key=True)
-    doc_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"))
-    ru_variant = Column(String, index=True, nullable=False)
-    abbr = Column(String, nullable=False)
-
-    __table_args__ = (
-        Index("ix_translit_doc_ru", "doc_id", "ru_variant"),
-    )
-
-
-class Chunk(Base):
+class Chunk(Base, MixinCore):
     __tablename__ = "chunks"
 
-    id = Column(Integer, primary_key=True)
-    doc_id = Column(Integer, ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
-    text = Column(Text, nullable=False)
+    doc_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    text: Mapped[str] = mapped_column(Text)
+    order: Mapped[int] = mapped_column()
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-
-    document = relationship("Document", back_populates="chunks")
-    extracted_items = relationship("ExtractedItem", back_populates="chunk", cascade="all, delete-orphan")
-
-    __table_args__ = (
-        Index("ix_chunk_doc_id", "doc_id"),
-    )
+    document: Mapped["Document"] = relationship(back_populates="chunks")
+    items: Mapped[list["ExtractedItem"]] = relationship(back_populates="chunk", cascade="all, delete-orphan")
 
 
-class ExtractedItem(Base):
+class ExtractedItem(Base, MixinCore):
     __tablename__ = "extracted_items"
 
-    id = Column(Integer, primary_key=True)
-    chunk_id = Column(Integer, ForeignKey("chunks.id", ondelete="CASCADE"), nullable=False)
-    item_type = Column(String, nullable=False)
-    word = Column(String, index=True, nullable=False)
-    definition = Column(Text, nullable=True)
-    is_final = Column(Boolean, default=False, nullable=False)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chunks.id", ondelete="CASCADE"), index=True)
+    item_type: Mapped[str] = mapped_column(String(20))
+    word: Mapped[str] = mapped_column(String(255))
+    definition: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    is_final: Mapped[bool] = mapped_column(Boolean, default=False)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    chunk: Mapped["Chunk"] = relationship(back_populates="items")
 
-    chunk = relationship("Chunk", back_populates="extracted_items")
 
-    __table_args__ = (
-        CheckConstraint(
-            "item_type IN ('term', 'abbr')",
-            name="ck_extracted_item_type",
-        ),
-        Index("ix_extracted_item_chunk_type", "chunk_id", "item_type"),
-    )
+class GlobalDictionary(Base):
+    __tablename__ = "global_dictionary"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    word: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    item_type: Mapped[str] = mapped_column(String(4))
+    definition: Mapped[str] = mapped_column(Text)
+
+
+class TransliterationDictionary(Base, MixinCore):
+    __tablename__ = "transliteration_entries"
+
+    abbr: Mapped[str] = mapped_column(String(20))
+    ru_variant: Mapped[str] = mapped_column(String(60))
+
+
+class SystemState(Base):
+    __tablename__ = "system_state"
+
+    key: Mapped[str] = mapped_column(String(50), primary_key=True) # "dict_build_status"
+    value: Mapped[str] = mapped_column(String(50)) # "processing", "ready", "error"
+    updated_at: Mapped[datetime] = mapped_column(default=func.now(), onupdate=func.now())
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

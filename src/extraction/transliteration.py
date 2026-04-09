@@ -1,4 +1,6 @@
 from itertools import product
+from typing import List
+
 
 ENG_TO_RU: dict[str, list[str]] = {
     "A": ["эй", "а", "э", "ей", "эи", "еи", "ай"],
@@ -44,7 +46,7 @@ ENG_TO_RU: dict[str, list[str]] = {
 
 
 def build_transliteration_map(
-    abbreviations: dict[str, str],
+    abbreviations: List[str],
     max_abbr_len: int,
 ) -> dict[str, str]:
     """
@@ -54,7 +56,7 @@ def build_transliteration_map(
     """
     results: dict[str, str] = {}
 
-    for abbr in sorted(abbreviations.keys()):
+    for abbr in sorted(abbreviations):
         if not abbr.isupper():
             continue
         if any("\u0400" <= ch <= "\u04ff" for ch in abbr):

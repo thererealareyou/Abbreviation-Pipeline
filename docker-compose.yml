@@ -22,7 +22,7 @@ services:
     container_name: fastapi_app
     restart: always
     command: >
-      sh -c "alembic upgrade head && uvicorn app:app --host 0.0.0.0 --port 8000"
+      sh -c "alembic upgrade head || alembic stamp head && uvicorn app:app --host 0.0.0.0 --port 8000"
     ports:
       - "8000:8000"
     environment:
@@ -41,11 +41,11 @@ services:
     build: .
     container_name: celery_worker
     restart: always
-    command: celery -A src.backend.tasks worker -l info --pool=threads --concurrency=8
+    command: celery -A src.backend.tasks.public worker -l info --pool=threads --concurrency=8
     environment:
-      - DATABASE_URL=${DATABASE_URL}
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
-      - LLM_API_URL=${LLM_API_URL}
+      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      - CELERY_BROKER_URL=amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@${RABBITMQ_HOST}:${RABBITMQ_PORT}//
+      - LLM_API_URL=http://${LLM_API_HOST}:${LLM_API_PORT}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     depends_on:

@@ -3,6 +3,7 @@ import json
 from rapidfuzz import fuzz
 from typing import List
 
+
 def abbr_in_text(abbr: str, text: str) -> bool:
     """Проверяет, что аббревиатура реально встречается в тексте как отдельная единица.
 
