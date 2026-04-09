@@ -12,6 +12,8 @@ from alembic import context
 
 from src.backend.models import Base
 
+from config import config as app_config
+
 target_metadata = Base.metadata
 
 config = context.config
@@ -19,10 +21,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-from src.backend.db import DATABASE_URL
-
 section = config.config_ini_section
-config.set_section_option(section, "sqlalchemy.url", DATABASE_URL)
+config.set_section_option(section, "sqlalchemy.url", app_config.DATABASE_URL)
 
 
 def run_migrations_offline() -> None:

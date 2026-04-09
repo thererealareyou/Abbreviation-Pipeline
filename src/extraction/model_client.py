@@ -1,15 +1,18 @@
 import json
-import os
+import re
+from config import config
 
 import yaml
 import asyncio
 import aiohttp
 from src.utils.logger import PipelineLogger
 
+
 logger = PipelineLogger.get_logger(__name__)
 
-with open("config/settings.yaml", "r", encoding="utf-8") as f:
-    config = yaml.safe_load(f)
+with open("config/prompts.yaml", "r", encoding="utf-8") as f:
+    prompts = yaml.safe_load(f)
+
 
 class AsyncAPIModelClient:
     """Асинхронный клиент для обращения к локальному серверу (llama.cpp server) батчами."""
@@ -44,7 +47,7 @@ class AsyncAPIModelClient:
         """
 
         messages = [
-            {"role": "system", "content": config['llm'][stage]['role_prompt']},
+            {"role": "system", "content": prompts['llm'][stage]['role_prompt']},
             {"role": "user", "content": prompt}
         ]
 
@@ -81,38 +84,41 @@ def get_llm_client():
         AsyncAPIModelClient: Готовый к использованию клиент, инициализированный
             параметрами (url, temperature) из глобальной конфигурации.
     """
+    try:
+        return AsyncAPIModelClient(
+            url=config.LLM_API_URL,
+            temperature=0.0,
+            max_parallel=8
+        )
+    except Exception as e:
+        logger.error(f"Ошибка при получении экземпляра клиента LLM: {e}")
 
-    return AsyncAPIModelClient(
-        url=os.getenv("LLM_API_URL"),
-        temperature=0.0,
-        max_parallel=8
-    )
 
 def parse_llm_definition_response(response_text: str) -> str | None:
-    """Парсит ответ LLM, извлекает expansion/definition, если has_definition == True. Возвращает строку или None.
-
-    Args:
-        response_text (str): Сырой текстовый ответ от LLM, ожидаемый в формате JSON
-            (возможно, с markdown-разметкой), содержащий флаг `has_definition`
-            и поле `expansion` или `definition`.
-
-    Returns:
-        str | None: Извлеченная очищенная строка с расшифровкой или определением,
-            если флаг `has_definition` имеет значение True. В случае ошибки парсинга
-            или отсутствия данных возвращает None.
-    """
-
     try:
-        clean_res = response_text.strip().replace('```json', '').replace('```', '')
-        data = json.loads(clean_res)
+        match = re.search(r"\{.*?\}", response_text, re.DOTALL)
+        if not match:
+            return None
 
-        has_def = data.get("has_definition")
+        data = json.loads(match.group(0))
         exp = data.get("expansion") or data.get("definition")
 
-        logger.info(f"{exp}")
-        if has_def and exp:
-            return exp.strip()
-    except Exception:
+        if data.get("has_definition") and exp:
+            return str(exp).strip()
+    except Exception as e:
+        logger.error(f"[PARSE DEF] Ошибка парсинга: {e}")
         return None
-
     return None
+
+
+def parse_llm_extraction_response(response_text: str) -> list[str]:
+    if not response_text: return []
+    try:
+        match = re.search(r"\[.*?\]", response_text, re.DOTALL)
+        if not match: return []
+
+        data = json.loads(match.group(0))
+        return [str(item).strip() for item in data if item]
+    except Exception as e:
+        logger.error(f"[PARSE EXTRACT] Ошибка: {e}")
+        return []
