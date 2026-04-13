@@ -8,6 +8,7 @@ from sqlalchemy import update
 from celery.utils.log import get_task_logger
 
 from src.extraction.model_client import get_llm_client, parse_llm_definition_response
+from src.extraction.regex_detector import verify_expansion_term, verify_expansion_abbr
 from src.backend.models import Document, ExtractedItem
 from src.utils.db import SessionLocal
 
@@ -63,13 +64,20 @@ async def define_items(
                 logger.info(f"[DEFINE] [LLM] Отправляю запрос | {item_type} | {word} | {chunk_text[:25]}.")
 
                 if not raw:
-                    return None
+                    return item_id, ""
 
                 definition = parse_llm_definition_response(raw)
-                return item_id, definition
+
+                if item_type == "abbr":
+                    is_valid = verify_expansion_abbr(word, definition, chunk_text)
+                else:
+                    is_valid = verify_expansion_term(word, definition, chunk_text)
+                if is_valid:
+                    return item_id, definition
+                return item_id, ""
             except Exception as e:
                 logger.error(f"[DEFINE] Ошибка LLM для word='{word}': {e}")
-                return None
+                return item_id, "Определение не найдено"
 
     async with aiohttp.ClientSession() as session:
         tasks = [

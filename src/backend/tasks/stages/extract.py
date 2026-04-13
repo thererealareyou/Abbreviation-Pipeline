@@ -9,8 +9,8 @@ from config import config
 from sqlalchemy import update
 from src.utils.db import SessionLocal
 from src.backend.models import ExtractedItem, Chunk, Document
-from src.extraction.model_client import get_llm_client
-from src.extraction.model_client import parse_llm_extraction_response
+from src.extraction.model_client import get_llm_client, parse_llm_extraction_response
+from src.extraction.regex_detector import clean_abbr_list, clean_terms_list
 
 
 logger = get_task_logger(__name__)
@@ -38,13 +38,17 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                 prompt = instructions.format(chunk_text=chunk.text)
                 raw = await model.generate_async(session, prompt, stage=stage)
 
-
                 logger.info(f"[EXTRACT] [LLM] Отправляю запрос | {item_type} | {chunk.text[:25]}.")
 
                 if not raw:
                     return []
 
                 found_words = parse_llm_extraction_response(raw)
+
+                if item_type == "abbr":
+                    found_words = clean_abbr_list(found_words, chunk.text)
+                else:
+                    found_words = clean_terms_list(found_words, chunk.text)
 
                 return [
                     ExtractedItem(

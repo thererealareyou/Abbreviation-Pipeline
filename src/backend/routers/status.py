@@ -33,16 +33,46 @@ def get_doc_status(document_id: str, db: Session = Depends(get_db)):
             raise HTTPException(status_code=404, detail="Документ не найден.")
 
         total_chunks = db.query(Chunk).filter_by(doc_id=doc.id).count()
-        total_found_abbrs = (db.query(ExtractedItem).join(Chunk)
-                             .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == "abbr").count())
-        total_found_terms = (db.query(ExtractedItem).join(Chunk)
-                             .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == "term").count())
-        total_defined_abbrs = (db.query(ExtractedItem).join(Chunk)
-                               .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == "abbr",
-                                       ExtractedItem.definition.isnot(None)).count())
-        total_defined_terms = (db.query(ExtractedItem).join(Chunk)
-                               .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == "term",
-                                       ExtractedItem.definition.isnot(None)).count())
+
+        total_found_abbrs = (
+            db.query(ExtractedItem)
+            .join(Chunk)
+            .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == "abbr")
+            .count()
+        )
+
+        total_found_terms = (
+            db.query(ExtractedItem)
+            .join(Chunk)
+            .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == "term")
+            .count()
+        )
+
+        total_defined_abbrs = (
+            db.query(ExtractedItem)
+            .join(Chunk)
+            .filter(
+                Chunk.doc_id == doc.id,
+                ExtractedItem.item_type == "abbr",
+                ExtractedItem.is_final == True,
+                ExtractedItem.definition.isnot(None),
+                ExtractedItem.definition != ""
+            )
+            .count()
+        )
+
+        total_defined_terms = (
+            db.query(ExtractedItem)
+            .join(Chunk)
+            .filter(
+                Chunk.doc_id == doc.id,
+                ExtractedItem.item_type == "term",
+                ExtractedItem.is_final == True,
+                ExtractedItem.definition.isnot(None),
+                ExtractedItem.definition != ""
+            )
+            .count()
+        )
 
         return {
             "document_id": document_id,
@@ -81,25 +111,20 @@ def get_documents_statistics(db: Session = Depends(get_db)):
     и состояние итогового глобального словаря.
     """
     try:
-        # 1. Документы
         total_docs = db.query(Document).count()
         completed_docs = db.query(Document).filter_by(status="completed").count()
 
-        # 2. Сырые извлечения (Mentions vs Unique)
-        # Считаем общее кол-во упоминаний и уникальных слов в ExtractedItem
         raw_stats = db.query(
             ExtractedItem.item_type,
             func.count(ExtractedItem.id).label("total"),
             func.count(func.distinct(ExtractedItem.word)).label("unique")
         ).group_by(ExtractedItem.item_type).all()
 
-        # Превращаем в удобный маппинг
         raw_data = {
             r.item_type: {"total": r.total, "unique": r.unique}
             for r in raw_stats
         }
 
-        # 3. Глобальный словарь (Уже очищенные и разрешенные данные)
         global_stats = db.query(
             GlobalDictionary.item_type,
             func.count(GlobalDictionary.id)
@@ -107,7 +132,6 @@ def get_documents_statistics(db: Session = Depends(get_db)):
 
         global_map = {item_type: count for item_type, count in global_stats}
 
-        # 4. Состояние системы
         build_states = db.execute(
             select(SystemState).where(SystemState.key.like("build_%"))
         ).scalars().all()

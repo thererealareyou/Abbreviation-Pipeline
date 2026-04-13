@@ -21,7 +21,8 @@ from src.backend.tasks.stages.extract import extract_items
 from src.backend.tasks.stages.define import define_items
 from src.backend.tasks.stages.resolve import resolve_items
 
-from sqlalchemy import update
+from sqlalchemy import update, func
+from sqlalchemy.orm import Session
 from sqlalchemy.dialects.postgresql import insert as pg_upsert
 
 logger = get_task_logger(__name__)
@@ -57,20 +58,13 @@ def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> Non
 
         asyncio.run(extract_items(chunks, item_type, doc_id))
 
-        db.execute(
-            update(Document)
-            .where(Document.id == doc_id)
-            .values(**{f"{item_type}_batches_done": Document.__table__.c[f"{item_type}_batches_done"] + 1})
-        )
-        db.commit()
-
         doc = db.query(Document).filter(Document.id == doc_id).first()
         batches_done = getattr(doc, f"{item_type}_batches_done")
         batches_total = getattr(doc, f"{item_type}_batches_total")
 
-        logger.info(f"[EXTRACT] doc_id={doc_id} {item_type} | Батч завершен: {batches_done}/{batches_total * 2}")
+        logger.info(f"[EXTRACT] doc_id={doc_id} {item_type} | Батч завершен: {batches_done}/{batches_total}")
 
-        if batches_done >= batches_total * 2:
+        if batches_done >= batches_total:
             search_done_flag = _SEARCH_DONE_FLAG[item_type]
             locked_doc = db.query(Document).filter(Document.id == doc_id).with_for_update().first()
 
@@ -89,22 +83,90 @@ def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> Non
 
 
 def _bulk_define(doc_id: int, item_ids: list[int], item_type: str) -> None:
-    logger.info(f"[DEFINE] Запуск для doc_id={str(doc_id)[:5]}, тип={item_type}, ID: {item_ids}")
+    def _check_and_set_define_finish(db: Session, doc_id: int, item_type: str):
+        """
+        Проверяет прогресс этапа Define и выставляет финальный флаг документа.
+        """
+        doc = db.query(Document).filter(Document.id == doc_id).with_for_update().first()
+        if not doc:
+            return
+
+        stats = (
+            db.query(
+                func.count(ExtractedItem.id).label("total"),
+                func.count(ExtractedItem.id).filter(
+                    ExtractedItem.is_final == True
+                ).label("processed")
+            )
+            .join(Chunk)
+            .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == item_type)
+            .one()
+        )
+
+        total_found = stats.total
+        items_processed = stats.processed
+
+        processed_attr = f"defining_{item_type}s"
+        if hasattr(doc, processed_attr):
+            setattr(doc, processed_attr, items_processed)
+
+        search_done_flag = _SEARCH_DONE_FLAG[item_type]
+        defs_done_flag = _DEFS_DONE_FLAG[item_type]
+
+        is_search_finished = getattr(doc, search_done_flag, False)
+
+        if is_search_finished and 0 < total_found <= items_processed:
+            if not getattr(doc, defs_done_flag):
+                logger.info(
+                    f"[COMPLETE] Этап Define ({item_type}) завершен. Обработано: {items_processed}/{total_found}")
+                setattr(doc, defs_done_flag, True)
+
+            terms_done = getattr(doc, _DEFS_DONE_FLAG.get("term", "term_defs_done"), False)
+            abbrs_done = getattr(doc, _DEFS_DONE_FLAG.get("abbr", "abbr_defs_done"), False)
+
+            if terms_done and abbrs_done:
+                setattr(doc, "status", "completed")
+
+        elif is_search_finished and total_found == 0:
+            setattr(doc, defs_done_flag, True)
+
+            terms_done = getattr(doc, _DEFS_DONE_FLAG.get("term", "term_defs_done"), False)
+            abbrs_done = getattr(doc, _DEFS_DONE_FLAG.get("abbr", "abbr_defs_done"), False)
+
+            if terms_done and abbrs_done:
+                setattr(doc, "status", "completed")
+
+        db.commit()
+
+
+    logger.info(f"[DEFINE] Проверка батча для doc_id={doc_id}, тип={item_type}")
+
+    with SessionLocal() as db:
+        stmt = (
+            update(ExtractedItem)
+            .where(ExtractedItem.id.in_(item_ids))
+            .where(ExtractedItem.is_final == False)
+            .values(is_final=True)
+            .returning(ExtractedItem.id)
+        )
+        locked_ids = db.execute(stmt).scalars().all()
+        db.commit()
+
+    if not locked_ids:
+        return
 
     with SessionLocal() as db:
         rows = (
             db.query(ExtractedItem.id, ExtractedItem.word, Chunk.text)
             .join(Chunk, ExtractedItem.chunk_id == Chunk.id)
-            .filter(ExtractedItem.id.in_(item_ids))
+            .filter(ExtractedItem.id.in_(locked_ids))
             .all()
         )
 
-        if not rows:
-            logger.info(f"[DEFINE] Батч пуст или уже обработан.")
-            return
+        if rows:
+            asyncio.run(define_items(doc_id, rows, item_type))
 
-        logger.info(f"[DEFINE] [LAUNCH] Запуск асинхронного процессора для {item_type}, {len(rows)} элементов.")
-        asyncio.run(define_items(doc_id, rows, item_type))
+        _check_and_set_define_finish(db, doc_id, item_type)
 
 def _bulk_resolve(item_type: ItemType) -> None:
     logger.info(f"[RESOLVE-GLOBAL] Запуск сборки словаря для типа: {item_type}")
