@@ -55,6 +55,11 @@ def load_config():
             return f"http://{llm.host}:{llm.port}"
 
         @property
+        def LLM_API_ENDPOINT(self):
+            llm = self.llm
+            return llm.endpoint
+
+        @property
         def BATCH_SIZE(self):
             pipeline = self.pipeline
             return pipeline.batch_size

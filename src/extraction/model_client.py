@@ -16,16 +16,18 @@ with open("config/prompts.yaml", "r", encoding="utf-8") as f:
 
 class AsyncAPIModelClient:
     """Асинхронный клиент для обращения к локальному серверу (llama.cpp server) батчами."""
-    def __init__(self, url: str, temperature: float, max_parallel: int) -> None:
+    def __init__(self, url: str, endpoint: str, temperature: float, max_parallel: int) -> None:
         """
         Args:
             url (str): URL-адрес API локального сервера.
+            endpoint (str): Эндпоинт обращения к локальному серверу.
             temperature (float): Параметр температуры для генерации ответов модели.
             max_parallel (int): Максимальное количество параллельных запросов к серверу
                 (ограничивается семафором).
         """
 
         self.url = url
+        self.endpoint = endpoint
         self.temperature = temperature
         self.semaphore = asyncio.Semaphore(max_parallel)
 
@@ -60,8 +62,7 @@ class AsyncAPIModelClient:
 
         async with self.semaphore:
             try:
-                endpoint = f"{self.url}/v1/chat/completions" if not self.url.endswith(
-                    "/v1/chat/completions") else self.url
+                endpoint = f"{self.url}/{self.endpoint}"
 
                 async with session.post(endpoint, json=payload) as response:
                     if response.status != 200:
@@ -87,6 +88,7 @@ def get_llm_client():
     try:
         return AsyncAPIModelClient(
             url=config.LLM_API_URL,
+            endpoint=config.LLM_API_ENDPOINT,
             temperature=0.0,
             max_parallel=8
         )

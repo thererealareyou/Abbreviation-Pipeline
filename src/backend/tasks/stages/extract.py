@@ -61,7 +61,7 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                     for word in found_words if word.strip()
                 ]
             except Exception as e:
-                logger.error(f"[EXTRACT] Ошибка в чанке id={chunk.id}: {e}")
+                logger.error(f"[EXTRACT] [ERROR] Ошибка в чанке id={chunk.id}: {e}")
                 return []
 
     async with aiohttp.ClientSession() as session:
@@ -105,9 +105,9 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                         bulk_define_terms.delay(doc_id, batch_ids)
 
                 logger.info(
-                    f"[EXTRACT] doc_id={doc_id}: Обработано {len(chunks)} чанков. "
+                    f"[EXTRACT] [RESULT] doc_id={doc_id}: Обработано {len(chunks)} чанков. "
                     f"Найдено {len(all_new_items)} {item_type}."
                 )
             except Exception as e:
                 db.rollback()
-                logger.error(f"[EXTRACT] Ошибка БД для doc_id={doc_id}: {e}")
+                logger.error(f"[EXTRACT] [ERROR] Ошибка БД для doc_id={doc_id}: {e}")

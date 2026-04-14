@@ -38,10 +38,10 @@ def _sync_save_definitions_and_progress(results: dict[int, str], doc_id: int, it
                 .values(**{f"defining_{item_type}s": getattr(Document, f"defining_{item_type}s") + count})
             )
             db.commit()
-            logger.info(f"[DEFINE] doc_id={doc_id}: Успешно сохранено {len(results)} определений ({item_type}).")
+            logger.info(f"[DEFINE] [FINISH] doc_id={doc_id}: Успешно сохранено {len(results)} определений ({item_type}).")
         except Exception as e:
             db.rollback()
-            logger.error(f"[DEFINE] Ошибка БД при сохранении для doc_id={doc_id}: {e}")
+            logger.error(f"[DEFINE] [ERROR] Ошибка БД при сохранении для doc_id={doc_id}: {e}")
 
 
 async def define_items(
@@ -76,7 +76,7 @@ async def define_items(
                     return item_id, definition
                 return item_id, ""
             except Exception as e:
-                logger.error(f"[DEFINE] Ошибка LLM для word='{word}': {e}")
+                logger.error(f"[DEFINE] [ERROR] Ошибка LLM для word='{word}': {e}")
                 return item_id, "Определение не найдено"
 
     async with aiohttp.ClientSession() as session:

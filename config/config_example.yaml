@@ -14,6 +14,7 @@ rabbitmq:
 llm:
   host: ${LLM_API_HOST}
   port: ${LLM_API_PORT}
+  endpoint: ${LLM_API_ENDPOINT}
 
 pipeline:
   batch_size: 10

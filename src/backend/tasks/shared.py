@@ -48,12 +48,12 @@ _CONFLICTS_DONE_FLAG = {"term": "term_conflicts_done", "abbr": "abbr_conflicts_d
 
 
 def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> None:
-    logger.info(f"[EXTRACT] Начат батч {item_type} для doc_id={doc_id}. Чанков в батче: {len(chunk_ids)}")
+    logger.info(f"[EXTRACT] [START] Начат батч {item_type} для doc_id={doc_id}. Чанков в батче: {len(chunk_ids)}")
     db = SessionLocal()
     try:
         chunks = db.query(Chunk).filter(Chunk.id.in_(chunk_ids)).all()
         if not chunks:
-            logger.warning(f"[EXTRACT] doc_id={doc_id}: Чанки не найдены в БД, пропускаем.")
+            logger.warning(f"[EXTRACT] [EMPTY] doc_id={doc_id}: Чанки не найдены в БД, пропускаем.")
             return
 
         asyncio.run(extract_items(chunks, item_type, doc_id))
@@ -62,7 +62,7 @@ def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> Non
         batches_done = getattr(doc, f"{item_type}_batches_done")
         batches_total = getattr(doc, f"{item_type}_batches_total")
 
-        logger.info(f"[EXTRACT] doc_id={doc_id} {item_type} | Батч завершен: {batches_done}/{batches_total}")
+        logger.info(f"[EXTRACT] [FINISH] doc_id={doc_id} {item_type} | Батч завершен: {batches_done}/{batches_total}")
 
         if batches_done >= batches_total:
             search_done_flag = _SEARCH_DONE_FLAG[item_type]
@@ -75,7 +75,7 @@ def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> Non
                 db.rollback()
 
     except Exception as e:
-        logger.error(f"[EXTRACT] Критическая ошибка doc_id={doc_id}, type={item_type}: {e}", exc_info=True)
+        logger.error(f"[EXTRACT] [ERROR] Критическая ошибка doc_id={doc_id}, type={item_type}: {e}", exc_info=True)
         db.rollback()
         raise
     finally:
@@ -139,7 +139,7 @@ def _bulk_define(doc_id: int, item_ids: list[int], item_type: str) -> None:
         db.commit()
 
 
-    logger.info(f"[DEFINE] Проверка батча для doc_id={doc_id}, тип={item_type}")
+    logger.info(f"[DEFINE] [START] Проверка батча для doc_id={doc_id}, тип={item_type}")
 
     with SessionLocal() as db:
         stmt = (
