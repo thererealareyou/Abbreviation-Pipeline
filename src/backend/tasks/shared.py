@@ -66,10 +66,26 @@ def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> Non
 
         if batches_done >= batches_total:
             search_done_flag = _SEARCH_DONE_FLAG[item_type]
+            defining_done_flag = _DEFS_DONE_FLAG[item_type]
+            if item_type == "term":
+                inverse_defining_done_flag = _DEFS_DONE_FLAG["abbr"]
+            else:
+                inverse_defining_done_flag = _DEFS_DONE_FLAG["term"]
             locked_doc = db.query(Document).filter(Document.id == doc_id).with_for_update().first()
+
 
             if getattr(locked_doc, search_done_flag) is False:
                 setattr(locked_doc, search_done_flag, True)
+                total_found_items = (
+                    db.query(ExtractedItem)
+                    .join(Chunk)
+                    .filter(Chunk.doc_id == doc_id, ExtractedItem.item_type == item_type)
+                    .count()
+                )
+                if total_found_items == 0:
+                    setattr(locked_doc, defining_done_flag, True)
+                    if getattr(locked_doc, inverse_defining_done_flag) is True:
+                        setattr(locked_doc, "status", "completed")
                 db.commit()
             else:
                 db.rollback()
