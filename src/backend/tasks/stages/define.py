@@ -61,7 +61,7 @@ async def define_items(
                 prompt = instructions.format(chunk_text=chunk_text, item=word)
                 raw = await model.generate_async(session, prompt, stage=stage)
 
-                logger.info(f"[DEFINE] [LLM] Отправляю запрос | {item_type} | {word} | {chunk_text[:25]}.")
+                logger.info(f"[DEFINE] [LLM_START] Отправляю запрос | {item_type} | {word} | {chunk_text[:25]}.")
 
                 if not raw:
                     return item_id, ""
@@ -89,7 +89,7 @@ async def define_items(
     results = {res[0]: res[1] for res in raw_results if res is not None}
 
     if results:
-        logger.info(f"[LLM_END] Получено определений: {len(results)}.")
+        logger.info(f"[DEFINE] [LLM_END] Получено определений: {len(results)}.")
         await asyncio.to_thread(
             _sync_save_definitions_and_progress,
             results,

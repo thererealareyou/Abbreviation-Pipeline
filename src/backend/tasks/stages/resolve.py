@@ -33,12 +33,12 @@ async def resolve_items(conflicts: dict[str, list[str]], item_type: str) -> dict
                     "{variations}", json.dumps(conflicts[word], ensure_ascii=False)
                 )
 
-                logger.info(f"[RESOLVE] [LLM] запрос: {item_type} | {word} (вариантов: {len(conflicts[word])})")
+                logger.info(f"[RESOLVE] [LLM_START] запрос: {item_type} | {word} (вариантов: {len(conflicts[word])})")
 
                 raw = await model.generate_async(session, prompt, stage=stage)
 
                 if not raw:
-                    raise ValueError("LLM returned empty response")
+                    raise ValueError("LLM вернула пустой запрос")
 
                 clean = raw.strip().replace("```json", "").replace("```", "")
                 data = json.loads(clean)
@@ -46,8 +46,12 @@ async def resolve_items(conflicts: dict[str, list[str]], item_type: str) -> dict
 
                 results[word] = final_val if final_val else conflicts[word][0]
 
+                logger.info(
+                    f"[RESOLVE] [LLM_END] {item_type} | Для слова {word} получено значение: {(results[word])[:20]}"
+                )
+
             except Exception as e:
-                logger.warning(f"[RESOLVE] Ошибка {word}: {e}. Берем первый вариант.")
+                logger.warning(f"[RESOLVE] [LLM_ERROR] Ошибка {word}: {e}. Берем первый вариант.")
                 results[word] = conflicts[word][0]
 
     connector = aiohttp.TCPConnector(limit=10)

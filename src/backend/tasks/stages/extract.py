@@ -38,7 +38,7 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                 prompt = instructions.format(chunk_text=chunk.text)
                 raw = await model.generate_async(session, prompt, stage=stage)
 
-                logger.info(f"[EXTRACT] [LLM] Отправляю запрос | {item_type} | {chunk.text[:25]}.")
+                logger.info(f"[EXTRACT] [LLM_START] Отправляю запрос | {item_type} | {chunk.text[:25]}.")
 
                 if not raw:
                     return []
@@ -61,7 +61,7 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                     for word in found_words if word.strip()
                 ]
             except Exception as e:
-                logger.error(f"[EXTRACT] [ERROR] Ошибка в чанке id={chunk.id}: {e}")
+                logger.error(f"[EXTRACT] [LLM_ERROR] Ошибка в чанке id={chunk.id}: {e}")
                 return []
 
     async with aiohttp.ClientSession() as session:
@@ -105,9 +105,9 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                         bulk_define_terms.delay(doc_id, batch_ids)
 
                 logger.info(
-                    f"[EXTRACT] [RESULT] doc_id={doc_id}: Обработано {len(chunks)} чанков. "
+                    f"[EXTRACT] [LLM_END] doc_id={doc_id}: Обработано {len(chunks)} чанков. "
                     f"Найдено {len(all_new_items)} {item_type}."
                 )
             except Exception as e:
                 db.rollback()
-                logger.error(f"[EXTRACT] [ERROR] Ошибка БД для doc_id={doc_id}: {e}")
+                logger.error(f"[EXTRACT] [LLM_ERROR] Ошибка БД для doc_id={doc_id}: {e}")

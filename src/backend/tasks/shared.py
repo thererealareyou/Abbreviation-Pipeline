@@ -169,7 +169,7 @@ def _bulk_define(doc_id: int, item_ids: list[int], item_type: str) -> None:
         _check_and_set_define_finish(db, doc_id, item_type)
 
 def _bulk_resolve(item_type: ItemType) -> None:
-    logger.info(f"[RESOLVE-GLOBAL] Запуск сборки словаря для типа: {item_type}")
+    logger.info(f"[RESOLVE] [GLOBAL] Запуск сборки словаря для типа: {item_type}")
     update_system_status(f"build_{item_type}", "processing")
     db = SessionLocal()
     try:
@@ -177,6 +177,7 @@ def _bulk_resolve(item_type: ItemType) -> None:
             db.query(ExtractedItem.word, ExtractedItem.definition)
             .filter(ExtractedItem.item_type == item_type)
             .filter(ExtractedItem.definition.isnot(None))
+            .filter(ExtractedItem.definition != "")
             .all()
         )
 
@@ -187,14 +188,14 @@ def _bulk_resolve(item_type: ItemType) -> None:
         conflicts = {w: list(defs) for w, defs in grouped.items() if len(defs) > 1}
         ready_map = {w: list(defs)[0] for w, defs in grouped.items() if len(defs) == 1}
 
-        logger.info(f"[RESOLVE-GLOBAL] Всего {len(grouped)} уникальных {item_type}. Конфликтов: {len(conflicts)}")
+        logger.info(f"[RESOLVE] [GLOBAL] Всего {len(grouped)} уникальных {item_type}. Конфликтов: {len(conflicts)}")
 
         if conflicts:
             resolved_map = asyncio.run(resolve_items(conflicts, item_type))
             ready_map.update(resolved_map)
 
         if ready_map:
-            logger.info(f"[RESOLVE-GLOBAL] Синхронизация {len(ready_map)} записей с GlobalDictionary.")
+            logger.info(f"[RESOLVE] [GLOBAL] Синхронизация {len(ready_map)} записей с GlobalDictionary.")
 
             for word in sorted(ready_map.keys()):
                 definition = ready_map[word]
@@ -221,16 +222,16 @@ def _bulk_resolve(item_type: ItemType) -> None:
         ).update({"is_final": True}, synchronize_session=False)
         db.commit()
 
-        logger.info(f"[RESOLVE-GLOBAL] Глобальный словарь ({item_type}) успешно обновлен.")
+        logger.info(f"[RESOLVE] [GLOBAL] Глобальный словарь ({item_type}) успешно обновлен.")
         update_system_status(f"build_{item_type}", "ready")
 
         if item_type == "abbr":
-            logger.info(f"[RESOLVE-GLOBAL] Запускаю построение транслитерационного словаря.")
+            logger.info(f"[RESOLVE] [GLOBAL] Запускаю построение транслитерационного словаря.")
             abbreviations = list(ready_map.keys())
             _bulk_transliteration(abbreviations, 6)
 
     except Exception as e:
-        logger.error(f"[RESOLVE-GLOBAL] Критическая ошибка: {e}", exc_info=True)
+        logger.error(f"[RESOLVE] [GLOBAL] Критическая ошибка: {e}", exc_info=True)
         update_system_status(f"build_{item_type}", "error", error=str(e))
         db.rollback()
         raise
