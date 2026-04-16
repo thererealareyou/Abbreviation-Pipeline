@@ -75,8 +75,11 @@ def start_extraction(payload: TextsRequest, db: Session = Depends(get_db)):
 
         db.commit()
 
-        for i in range(0, len(chunk_ids), CHUNK_BATCH):
-            batch = list(chunk_ids[i:i + CHUNK_BATCH])
+        stmt = select(Chunk.id).where(Chunk.doc_id == doc.id).order_by(Chunk.order)
+        all_chunk_ids = db.scalars(stmt).all()
+
+        for i in range(0, len(all_chunk_ids), CHUNK_BATCH):
+            batch = list(all_chunk_ids[i:i + CHUNK_BATCH])
             bulk_extract_terms.delay(doc.id, batch)
             bulk_extract_abbrs.delay(doc.id, batch)
 

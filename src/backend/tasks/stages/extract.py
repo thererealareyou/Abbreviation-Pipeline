@@ -1,6 +1,7 @@
 import asyncio
 import yaml
 import aiohttp
+import re
 
 from typing import Literal
 from celery.utils.log import get_task_logger
@@ -35,10 +36,13 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
     async def process_one(session, chunk: Chunk):
         async with sem:
             try:
-                prompt = instructions.format(chunk_text=chunk.text)
+                text = chunk.text
+                text = re.sub(r'[*~#]', ' ', text)
+                text = re.sub(r'\s+', ' ', text).strip()
+                prompt = instructions.format(chunk_text=text)
                 raw = await model.generate_async(session, prompt, stage=stage)
 
-                logger.info(f"[EXTRACT] [LLM_START] Отправляю запрос | {item_type} | {chunk.text[:25]}.")
+                logger.info(f"[EXTRACT] [LLM_START] Отправляю запрос | {item_type} | {text[:25]}.")
 
                 if not raw:
                     return []
@@ -46,9 +50,9 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                 found_words = parse_llm_extraction_response(raw)
 
                 if item_type == "abbr":
-                    found_words = clean_abbr_list(found_words, chunk.text)
+                    found_words = clean_abbr_list(found_words, text)
                 else:
-                    found_words = clean_terms_list(found_words, chunk.text)
+                    found_words = clean_terms_list(found_words, text)
 
                 return [
                     ExtractedItem(

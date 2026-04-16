@@ -1,6 +1,7 @@
 import re
 import json
 from rapidfuzz import fuzz
+from transliterate import translit
 from typing import List
 
 
@@ -157,29 +158,23 @@ def verify_expansion_abbr(abbr: str, expansion: str, chunk_text: str, similarity
         bool: True, если расшифровка валидна и найдена в тексте.
     """
 
-    # 1. Базовая проверка на пустоту
     if not expansion or expansion.lower() == "null":
         return False
 
-    # 2. Исключаем варианты, где модель вернула "АББР — расшифровка"
-    # (часто бывает, если LLM "заклинило" на формате словаря)
     dash_pattern = rf"{re.escape(abbr)}\s*[-—–]"
     if re.search(dash_pattern, expansion, re.IGNORECASE):
         return False
 
-    # 3. Если расшифровка начинается с самой аббревиатуры (например, "ЗО КИИ Значимый объект..."),
-    # отрезаем лишнее для корректного нечеткого поиска.
     if expansion.lower().startswith(f"{abbr.lower()} "):
         expansion = expansion[len(abbr):].strip()
 
-    # 4. Проверяем, что расшифровка — это не просто сама аббревиатура
     if expansion.lower() == abbr.lower():
         return False
 
-    # 5. Нечеткий поиск расшифровки в тексте чанка
-    # Используем partial_ratio, так как расшифровка может быть в другом падеже
-    # или быть частью длинного предложения.
     score = fuzz.partial_ratio(expansion.lower(), chunk_text.lower())
+
+    if not is_valid_definition(abbr, expansion):
+        return False
 
     if score >= similarity_threshold:
         return True
@@ -217,6 +212,38 @@ def clean_abbr_list(abbrs: List[str], text: str) -> List[str]:
         if not abbr_in_text(abbr, text):
             continue
 
+        if len(item) > 5:
+            continue
+
         result.add(abbr)
 
     return sorted(result)
+
+
+def is_valid_definition(word: str, definition: str) -> bool:
+    if not definition or not word:
+        return False
+
+    w_clean = re.sub(r'[^\w]', '', word.lower())
+    d_clean = re.sub(r'[^\w]', '', definition.lower())
+
+    if w_clean == d_clean:
+        return False
+
+    try:
+        w_translit_ru = translit(w_clean, 'ru')
+        if w_translit_ru == d_clean:
+            return False
+
+        d_translit_en = translit(d_clean, 'ru', reversed=True)
+        if d_translit_en == w_clean:
+            return False
+
+    except Exception:
+        pass
+
+    if " " not in definition.strip().replace("  ", " "):
+        if len(d_clean) < len(w_clean) + 3:
+            return False
+
+    return True
