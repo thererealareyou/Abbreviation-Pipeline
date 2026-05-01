@@ -117,7 +117,7 @@ def get_result(
     Returns:
         Словарь {слово: определение}.
     """
-    if target not in ("abbr", "term", "transliteration"):
+    if target not in ("abbr", "term"):
         raise HTTPException(
             status_code=400,
             detail="Параметр target должен быть 'abbr' или 'term'.",
@@ -169,7 +169,7 @@ def get_result(
         raise HTTPException(status_code=500, detail=f"Ошибка при получении результата: {str(e)}")
 
 
-@router.delete("/delete/{document_id}")
+@router.delete("/delete/{document_name}")
 def delete_document(document_name: str, db: Session = Depends(get_db)):
     """
     Удаляет документ и все связанные с ним данные.
