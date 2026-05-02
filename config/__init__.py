@@ -1,17 +1,20 @@
 import os
 import re
+
 import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
 
+
 def _interpolate(value):
     if isinstance(value, str):
+
         def replacer(match):
             var_name = match.group(1) or match.group(2)
             return os.getenv(var_name, match.group(0))
 
-        pattern = r'\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)'
+        pattern = r"\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)"
         return re.sub(pattern, replacer, value)
     elif isinstance(value, dict):
         return {k: _interpolate(v) for k, v in value.items()}

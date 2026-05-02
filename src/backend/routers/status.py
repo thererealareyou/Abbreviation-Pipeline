@@ -1,14 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
-from src.backend.models import Document, Chunk, ExtractedItem, SystemState, GlobalDictionary
+from src.backend.models import (Chunk, Document, ExtractedItem,
+                                GlobalDictionary, SystemState)
 from src.utils.db import get_db
 
-
-router = APIRouter(
-    prefix="/status"
-)
+router = APIRouter(prefix="/status")
 
 
 @router.get("/documents/detailed/{document_id}")
@@ -54,9 +52,9 @@ def get_doc_status(document_id: str, db: Session = Depends(get_db)):
             .filter(
                 Chunk.doc_id == doc.id,
                 ExtractedItem.item_type == "abbr",
-                ExtractedItem.is_final == True,
+                ExtractedItem.is_final,
                 ExtractedItem.definition.isnot(None),
-                ExtractedItem.definition != ""
+                ExtractedItem.definition != "",
             )
             .count()
         )
@@ -67,9 +65,9 @@ def get_doc_status(document_id: str, db: Session = Depends(get_db)):
             .filter(
                 Chunk.doc_id == doc.id,
                 ExtractedItem.item_type == "term",
-                ExtractedItem.is_final == True,
+                ExtractedItem.is_final,
                 ExtractedItem.definition.isnot(None),
-                ExtractedItem.definition != ""
+                ExtractedItem.definition != "",
             )
             .count()
         )
@@ -102,7 +100,10 @@ def get_doc_status(document_id: str, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка при получении статуса: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Ошибка при получении статуса: {str(e)}"
+        )
+
 
 @router.get("/documents/stats")
 def get_documents_statistics(db: Session = Depends(get_db)):
@@ -114,33 +115,39 @@ def get_documents_statistics(db: Session = Depends(get_db)):
         total_docs = db.query(Document).count()
         completed_docs = db.query(Document).filter_by(status="completed").count()
 
-        raw_stats = db.query(
-            ExtractedItem.item_type,
-            func.count(ExtractedItem.id).label("total"),
-            func.count(func.distinct(ExtractedItem.word)).label("unique")
-        ).group_by(ExtractedItem.item_type).all()
+        raw_stats = (
+            db.query(
+                ExtractedItem.item_type,
+                func.count(ExtractedItem.id).label("total"),
+                func.count(func.distinct(ExtractedItem.word)).label("unique"),
+            )
+            .group_by(ExtractedItem.item_type)
+            .all()
+        )
 
         raw_data = {
-            r.item_type: {"total": r.total, "unique": r.unique}
-            for r in raw_stats
+            r.item_type: {"total": r.total, "unique": r.unique} for r in raw_stats
         }
 
-        global_stats = db.query(
-            GlobalDictionary.item_type,
-            func.count(GlobalDictionary.id)
-        ).group_by(GlobalDictionary.item_type).all()
+        global_stats = (
+            db.query(GlobalDictionary.item_type, func.count(GlobalDictionary.id))
+            .group_by(GlobalDictionary.item_type)
+            .all()
+        )
 
         global_map = {item_type: count for item_type, count in global_stats}
 
-        build_states = db.execute(
-            select(SystemState).where(SystemState.key.like("build_%"))
-        ).scalars().all()
+        build_states = (
+            db.execute(select(SystemState).where(SystemState.key.like("build_%")))
+            .scalars()
+            .all()
+        )
         is_syncing = any(s.value == "processing" for s in build_states)
 
         return {
             "system_status": {
                 "is_dictionary_building": is_syncing,
-                "last_sync_states": {s.key: s.value for s in build_states}
+                "last_sync_states": {s.key: s.value for s in build_states},
             },
             "documents": {
                 "total": total_docs,
@@ -162,7 +169,7 @@ def get_documents_statistics(db: Session = Depends(get_db)):
                 "total_entities": sum(global_map.values()),
                 "final_abbrs": global_map.get("abbr", 0),
                 "final_terms": global_map.get("term", 0),
-            }
+            },
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка статистики: {str(e)}")
@@ -186,12 +193,18 @@ def list_documents(limit: int = 50, offset: int = 0, db: Session = Depends(get_d
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit должен быть от 1 до 500.")
     if offset < 0:
-        raise HTTPException(status_code=400, detail="offset не может быть отрицательным.")
+        raise HTTPException(
+            status_code=400, detail="offset не может быть отрицательным."
+        )
 
     try:
-        docs = (db.query(Document)
-                .order_by(Document.created_at.desc())
-                .offset(offset).limit(limit).all())
+        docs = (
+            db.query(Document)
+            .order_by(Document.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+            .all()
+        )
         return {
             "total": db.query(Document).count(),
             "offset": offset,
@@ -207,4 +220,6 @@ def list_documents(limit: int = 50, offset: int = 0, db: Session = Depends(get_d
             ],
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка при получении списка документов: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Ошибка при получении списка документов: {str(e)}"
+        )

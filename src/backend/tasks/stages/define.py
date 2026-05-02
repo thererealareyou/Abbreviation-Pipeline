@@ -1,17 +1,17 @@
 import asyncio
-import yaml
-import aiohttp
-
 from typing import Literal
+
+import aiohttp
+import yaml
+from celery.utils.log import get_task_logger
 from sqlalchemy import update
 
-from celery.utils.log import get_task_logger
-
-from src.extraction.model_client import get_llm_client, parse_llm_definition_response
-from src.extraction.regex_detector import verify_expansion_term, verify_expansion_abbr
 from src.backend.models import Document, ExtractedItem
+from src.extraction.model_client import (get_llm_client,
+                                         parse_llm_definition_response)
+from src.extraction.regex_detector import (verify_expansion_abbr,
+                                           verify_expansion_term)
 from src.utils.db import SessionLocal
-
 
 logger = get_task_logger(__name__)
 
@@ -22,32 +22,44 @@ with open("config/prompts.yaml", "r", encoding="utf-8") as f:
     prompts = yaml.safe_load(f)
 
 
-def _sync_save_definitions_and_progress(results: dict[int, str], doc_id: int, item_type: str, count: int):
+def _sync_save_definitions_and_progress(
+    results: dict[int, str], doc_id: int, item_type: str, count: int
+):
     """Синхронная запись в БД: сохраняет сами определения и обновляет прогресс."""
     with SessionLocal() as db:
         try:
             for item_id, text in results.items():
                 db.query(ExtractedItem).filter(ExtractedItem.id == item_id).update(
-                    {"definition": text},
-                    synchronize_session=False
+                    {"definition": text}, synchronize_session=False
                 )
 
             db.execute(
                 update(Document)
                 .where(Document.id == doc_id)
-                .values(**{f"defining_{item_type}s": getattr(Document, f"defining_{item_type}s") + count})
+                .values(
+                    **{
+                        f"defining_{item_type}s": getattr(
+                            Document, f"defining_{item_type}s"
+                        )
+                        + count
+                    }
+                )
             )
             db.commit()
-            logger.info(f"[DEFINE] [FINISH] doc_id={doc_id}: Успешно сохранено {len(results)} определений ({item_type}).")
+            logger.info(
+                f"[DEFINE] [FINISH] doc_id={doc_id}: Успешно сохранено {len(results)} определений ({item_type})."
+            )
         except Exception as e:
             db.rollback()
-            logger.error(f"[DEFINE] [ERROR] Ошибка БД при сохранении для doc_id={doc_id}: {e}")
+            logger.error(
+                f"[DEFINE] [ERROR] Ошибка БД при сохранении для doc_id={doc_id}: {e}"
+            )
 
 
 async def define_items(
-        doc_id: int,
-        items_with_context: list[tuple[int, str, str]],
-        item_type: str,
+    doc_id: int,
+    items_with_context: list[tuple[int, str, str]],
+    item_type: str,
 ) -> None:
     stage = "defining_term" if item_type == "term" else "defining_abbr"
     instructions = prompts["llm"][stage]["instructions"]
@@ -61,7 +73,9 @@ async def define_items(
                 prompt = instructions.format(chunk_text=chunk_text, item=word)
                 raw = await model.generate_async(session, prompt, stage=stage)
 
-                logger.info(f"[DEFINE] [LLM_START] Отправляю запрос | {item_type} | {word} | {chunk_text[:25]}.")
+                logger.info(
+                    f"[DEFINE] [LLM_START] Отправляю запрос | {item_type} | {word} | {chunk_text[:25]}."
+                )
 
                 if not raw:
                     return item_id, ""
@@ -95,5 +109,5 @@ async def define_items(
             results,
             doc_id,
             item_type,
-            len(items_with_context)
+            len(items_with_context),
         )

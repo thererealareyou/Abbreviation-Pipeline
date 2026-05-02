@@ -1,10 +1,13 @@
 import logging
+
 import httpx
 from fastapi import APIRouter, Depends
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import text
 from sqlalchemy.orm import Session
-from src.utils.db import get_db
+
 from config import config
+from src.utils.db import get_db
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +25,9 @@ async def check_health(db: Session = Depends(get_db)):
     llm_status = "ok"
 
     try:
-        db.execute(text("SELECT 1"))
+        await run_in_threadpool(lambda: db.execute(text("SELECT 1")))
     except Exception as e:
-        logger.error(
-            f"[SYSTEM] [HEALTH] Ошибка подключения к БД: {e}",
-            exc_info=True
-        )
+        logger.error(f"[SYSTEM] [HEALTH] Ошибка подключения к БД: {e}", exc_info=True)
         db_status = "error"
 
     try:
@@ -43,13 +43,13 @@ async def check_health(db: Session = Depends(get_db)):
         llm_status = "unreachable"
         logger.error(
             f"[SYSTEM] [HEALTH] Таймаут при подключении к LLM ({llm_url})",
-            exc_info=True
+            exc_info=True,
         )
     except httpx.RequestError as e:
         llm_status = "unreachable"
         logger.error(
             f"[SYSTEM] [HEALTH] Ошибка подключения к LLM ({llm_url}): {e}",
-            exc_info=True
+            exc_info=True,
         )
 
     overall = "ok" if (db_status == "ok") else "error"

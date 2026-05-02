@@ -1,8 +1,8 @@
 import re
-import json
+from typing import List
+
 from rapidfuzz import fuzz
 from transliterate import translit
-from typing import List
 
 
 def abbr_in_text(abbr: str, text: str) -> bool:
@@ -66,7 +66,9 @@ def term_in_text(term: str, text: str) -> bool:
     return re.search(pattern, text) is not None
 
 
-def verify_expansion_term(abbr: str, expansion: str, chunk_text: str, similarity_threshold: float = 80.0) -> bool:
+def verify_expansion_term(
+    abbr: str, expansion: str, chunk_text: str, similarity_threshold: float = 80.0
+) -> bool:
     """Проверяет, является ли предложенная моделью расшифровка достоверной.
 
     Args:
@@ -89,7 +91,7 @@ def verify_expansion_term(abbr: str, expansion: str, chunk_text: str, similarity
         return False
 
     if expansion.lower().startswith(f"{abbr.lower()} "):
-        expansion = expansion[len(abbr):].strip()
+        expansion = expansion[len(abbr) :].strip()
     score = fuzz.partial_ratio(expansion.lower(), chunk_text.lower())
 
     if score >= similarity_threshold:
@@ -141,7 +143,9 @@ def clean_terms_list(terms: List[str], text: str, threshold: float = 0.6) -> Lis
     return sorted(result)
 
 
-def verify_expansion_abbr(abbr: str, expansion: str, chunk_text: str, similarity_threshold: float = 80.0) -> bool:
+def verify_expansion_abbr(
+    abbr: str, expansion: str, chunk_text: str, similarity_threshold: float = 80.0
+) -> bool:
     """Проверяет, является ли предложенная моделью расшифровка аббревиатуры достоверной.
 
     Функция отсеивает пустые ответы, исключает рекурсивные определения (где расшифровка
@@ -166,7 +170,7 @@ def verify_expansion_abbr(abbr: str, expansion: str, chunk_text: str, similarity
         return False
 
     if expansion.lower().startswith(f"{abbr.lower()} "):
-        expansion = expansion[len(abbr):].strip()
+        expansion = expansion[len(abbr) :].strip()
 
     if expansion.lower() == abbr.lower():
         return False
@@ -224,18 +228,18 @@ def is_valid_definition(word: str, definition: str) -> bool:
     if not definition or not word:
         return False
 
-    w_clean = re.sub(r'[^\w]', '', word.lower())
-    d_clean = re.sub(r'[^\w]', '', definition.lower())
+    w_clean = re.sub(r"[^\w]", "", word.lower())
+    d_clean = re.sub(r"[^\w]", "", definition.lower())
 
     if w_clean == d_clean:
         return False
 
     try:
-        w_translit_ru = translit(w_clean, 'ru')
+        w_translit_ru = translit(w_clean, "ru")
         if w_translit_ru == d_clean:
             return False
 
-        d_translit_en = translit(d_clean, 'ru', reversed=True)
+        d_translit_en = translit(d_clean, "ru", reversed=True)
         if d_translit_en == w_clean:
             return False
 

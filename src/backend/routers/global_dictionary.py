@@ -1,46 +1,63 @@
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
-from fastapi import APIRouter, Depends, HTTPException
-from src.backend.models import TransliterationDictionary, GlobalDictionary, SystemState
+from src.backend.models import (GlobalDictionary, SystemState,
+                                TransliterationDictionary)
 from src.backend.tasks.public import bulk_resolve_abbrs, bulk_resolve_terms
-
 from src.utils.db import get_db
 
-
-router = APIRouter(
-    prefix="/global_dictionary"
-)
+router = APIRouter(prefix="/global_dictionary")
 
 
 @router.post("/build")
-def build_dictionary():
+def build_dictionary(db: Session = Depends(get_db)):
     """
     Запускает сборку глобального словаря ПО ВСЕМ ДОКУМЕНТАМ, разрешая конфликты. Выполнение этой функции может занять некоторое время.
 
     :return: Словарь с id celery-задач.
     """
     try:
+        build_state = (
+            db.execute(
+                select(SystemState)
+                .where(SystemState.key.in_(["build_term", "build_abbr"]))
+                .with_for_update()
+            )
+            .scalars()
+            .all()
+        )
+
+        if any(s.value == "processing" for s in build_state):
+            raise HTTPException(
+                status_code=425,
+                detail="Словарь уже строится, но ещё не готов.",
+            )
+
+        db.execute(
+            update(SystemState)
+            .where(SystemState.key.in_(["build_term", "build_abbr"]))
+            .values(value="processing")
+        )
+
+        db.commit()
+
         task_abbrs = bulk_resolve_abbrs.delay()
         task_terms = bulk_resolve_terms.delay()
         return {
             "status": "processing",
             "message": "Сборка глобального словаря запущена в фоновом режиме.",
-            "task_ids": {
-                "terms": task_terms.id,
-                "abbrs": task_abbrs.id
-            }
+            "task_ids": {"terms": task_terms.id, "abbrs": task_abbrs.id},
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Не удалось запустить сборку: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Не удалось запустить сборку: {str(e)}"
+        )
 
 
 @router.get("/result")
 def get_result(
-        target: str,
-        limit: int = 100,
-        offset: int = 0,
-        db: Session = Depends(get_db)
+    target: str, limit: int = 100, offset: int = 0, db: Session = Depends(get_db)
 ):
     """
     Возвращает итоговый словарь или транслитерационную таблицу для глобального документа.
@@ -65,20 +82,25 @@ def get_result(
     if limit < 1 or limit > 1000:
         raise HTTPException(status_code=400, detail="limit должен быть от 1 до 1000.")
     if offset < 0:
-        raise HTTPException(status_code=400, detail="offset не может быть отрицательным.")
+        raise HTTPException(
+            status_code=400, detail="offset не может быть отрицательным."
+        )
 
     try:
-        doc = db.query(GlobalDictionary)
-        if not doc:
-            raise HTTPException(status_code=404, detail="Словарь не существует.")
-        build_state = db.execute(
-            select(SystemState).where(SystemState.key.in_(["build_term", "build_abbr"]))
-        ).scalars().all()
+        build_state = (
+            db.execute(
+                select(SystemState).where(
+                    SystemState.key.in_(["build_term", "build_abbr"])
+                )
+            )
+            .scalars()
+            .all()
+        )
 
         if any(s.value == "processing" for s in build_state):
             raise HTTPException(
                 status_code=425,
-                detail=f"Словарь ещё не готов.",
+                detail="Словарь ещё не готов.",
             )
 
         if target in ("abbr", "term"):
@@ -94,9 +116,12 @@ def get_result(
 
         else:
             stmt = (
-                select(TransliterationDictionary.ru_variant, TransliterationDictionary.abbr)
+                select(
+                    TransliterationDictionary.ru_variant, TransliterationDictionary.abbr
+                )
                 .order_by(TransliterationDictionary.abbr)
-                .offset(offset).limit(limit)
+                .offset(offset)
+                .limit(limit)
             )
             result = db.execute(stmt).all()
             data = {row.ru_variant: row.abbr for row in result}
@@ -111,10 +136,9 @@ def get_result(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Ошибка при получении результата: {str(e)}")
-
-
-from sqlalchemy import delete
+        raise HTTPException(
+            status_code=500, detail=f"Ошибка при получении результата: {str(e)}"
+        )
 
 
 @router.delete("/delete")
@@ -123,9 +147,15 @@ def delete_dictionary(db: Session = Depends(get_db)):
     Полностью очищает глобальный словарь и связанные данные.
     """
     try:
-        build_state = db.execute(
-            select(SystemState).where(SystemState.key.in_(["build_term", "build_abbr"]))
-        ).scalars().all()
+        build_state = (
+            db.execute(
+                select(SystemState).where(
+                    SystemState.key.in_(["build_term", "build_abbr"])
+                )
+            )
+            .scalars()
+            .all()
+        )
 
         if any(s.value == "processing" for s in build_state):
             raise HTTPException(
@@ -134,15 +164,10 @@ def delete_dictionary(db: Session = Depends(get_db)):
             )
 
         db.execute(delete(GlobalDictionary))
-
         db.execute(delete(TransliterationDictionary))
-
         db.commit()
 
-        return {
-            "status": "success",
-            "message": "Глобальный словарь полностью очищен."
-        }
+        return {"status": "success", "message": "Глобальный словарь полностью очищен."}
 
     except HTTPException:
         raise

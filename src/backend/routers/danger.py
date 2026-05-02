@@ -6,13 +6,10 @@ from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from src.backend.models import Document, TransliterationDictionary
-from src.utils.db import get_db
 from src.backend.schemas import ResetRequest
+from src.utils.db import get_db
 
-
-router = APIRouter(
-    prefix="/danger"
-)
+router = APIRouter(prefix="/danger")
 
 
 security_store: dict = {
@@ -48,7 +45,9 @@ def clear_database(payload: ResetRequest, db: Session = Depends(get_db)):
     Для предотвращения случайных нажатий нужен код из ручки danger/generate-reset-code.
     """
     if not security_store["reset_code"] or time.time() > security_store["expires_at"]:
-        raise HTTPException(status_code=400, detail="Код истёк или не был сгенерирован.")
+        raise HTTPException(
+            status_code=400, detail="Код истёк или не был сгенерирован."
+        )
 
     if payload.code != security_store["reset_code"]:
         raise HTTPException(status_code=403, detail="Неверный код подтверждения.")

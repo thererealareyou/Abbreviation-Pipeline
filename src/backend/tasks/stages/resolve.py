@@ -1,12 +1,11 @@
 import asyncio
 import json
+
 import aiohttp
 import yaml
-
 from celery.utils.log import get_task_logger
 
 from src.extraction.model_client import get_llm_client
-
 
 logger = get_task_logger(__name__)
 
@@ -14,7 +13,9 @@ with open("config/prompts.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 
-async def resolve_items(conflicts: dict[str, list[str]], item_type: str) -> dict[str, str]:
+async def resolve_items(
+    conflicts: dict[str, list[str]], item_type: str
+) -> dict[str, str]:
     if not conflicts:
         return {}
 
@@ -33,7 +34,9 @@ async def resolve_items(conflicts: dict[str, list[str]], item_type: str) -> dict
                     "{variations}", json.dumps(conflicts[word], ensure_ascii=False)
                 )
 
-                logger.info(f"[RESOLVE] [LLM_START] запрос: {item_type} | {word} (вариантов: {len(conflicts[word])})")
+                logger.info(
+                    f"[RESOLVE] [LLM_START] запрос: {item_type} | {word} (вариантов: {len(conflicts[word])})"
+                )
 
                 raw = await model.generate_async(session, prompt, stage=stage)
 
@@ -51,7 +54,9 @@ async def resolve_items(conflicts: dict[str, list[str]], item_type: str) -> dict
                 )
 
             except Exception as e:
-                logger.warning(f"[RESOLVE] [LLM_ERROR] Ошибка {word}: {e}. Берем первый вариант.")
+                logger.warning(
+                    f"[RESOLVE] [LLM_ERROR] Ошибка {word}: {e}. Берем первый вариант."
+                )
                 results[word] = conflicts[word][0]
 
     connector = aiohttp.TCPConnector(limit=10)
