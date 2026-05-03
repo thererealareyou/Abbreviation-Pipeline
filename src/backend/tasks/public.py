@@ -11,7 +11,6 @@ from src.utils.logger import PipelineLogger, trace_id_var
 def config_loggers(*args, **kwtags):
     PipelineLogger.setup_logging()
 
-
 logger = get_task_logger(__name__)
 
 app = Celery("nlp_pipeline", broker=config.CELERY_BROKER_URL)
@@ -25,9 +24,11 @@ def bulk_extract_terms(
 ) -> None:
     token = trace_id_var.set(trace_id)
     try:
+        logger.info(f"[TASK] [EXTRACT] [START] Термины: doc_id={doc_id}, chunks={len(chunk_ids)}")
         _bulk_extract(doc_id, chunk_ids, "term")
+        logger.info(f"[TASK] [EXTRACT] [FINISH] Термины: doc_id={doc_id}")
     except Exception as exc:
-        logger.warning(f"Ошибка в батче с терминами, пробую еще раз: {exc}")
+        logger.warning(f"[TASK] [EXTRACT] [RETRY] Термины: doc_id={doc_id}, причина: {exc}")
         raise self.retry(exc=exc)
     finally:
         trace_id_var.reset(token)
@@ -41,9 +42,11 @@ def bulk_extract_abbrs(
 ) -> None:
     token = trace_id_var.set(trace_id)
     try:
+        logger.info(f"[TASK] [EXTRACT] [START] Аббревиатуры: doc_id={doc_id}, chunks={len(chunk_ids)}")
         _bulk_extract(doc_id, chunk_ids, "abbr")
+        logger.info(f"[TASK] [EXTRACT] [FINISH] Аббревиатуры: doc_id={doc_id}")
     except Exception as exc:
-        logger.warning(f"Ошибка в батче с аббревиатурами, пробую еще раз: {exc}")
+        logger.warning(f"[TASK] [EXTRACT] [RETRY] Аббревиатуры: doc_id={doc_id}, причина: {exc}")
         raise self.retry(exc=exc)
     finally:
         trace_id_var.reset(token)
@@ -57,9 +60,11 @@ def bulk_define_terms(
 ) -> None:
     token = trace_id_var.set(trace_id)
     try:
-        logger.info(f"[DEFINE] [START] Запуск терминов, батч: {len(item_ids)} шт.")
+        logger.info(f"[TASK] [DEFINE] [START] Термины: doc_id={doc_id}, items={len(item_ids)}")
         _bulk_define(doc_id, item_ids, "term")
+        logger.info(f"[TASK] [DEFINE] [FINISH] Термины: doc_id={doc_id}")
     except Exception as exc:
+        logger.warning(f"[TASK] [DEFINE] [RETRY] Термины: doc_id={doc_id}, причина: {exc}")
         raise self.retry(exc=exc)
     finally:
         trace_id_var.reset(token)
@@ -73,9 +78,11 @@ def bulk_define_abbrs(
 ) -> None:
     token = trace_id_var.set(trace_id)
     try:
-        logger.info(f"[DEFINE] [START] Запуск аббревиатур, батч: {len(item_ids)} шт.")
+        logger.info(f"[TASK] [DEFINE] [START] Аббревиатуры: doc_id={doc_id}, items={len(item_ids)}")
         _bulk_define(doc_id, item_ids, "abbr")
+        logger.info(f"[TASK] [DEFINE] [FINISH] Аббревиатуры: doc_id={doc_id}")
     except Exception as exc:
+        logger.warning(f"[TASK] [DEFINE] [RETRY] Аббревиатуры: doc_id={doc_id}, причина: {exc}")
         raise self.retry(exc=exc)
     finally:
         trace_id_var.reset(token)
@@ -87,11 +94,11 @@ def bulk_define_abbrs(
 def bulk_resolve_terms(self, trace_id: str = "unknown") -> None:
     token = trace_id_var.set(trace_id)
     try:
+        logger.info("[TASK] [RESOLVE] [START] Разрешение конфликтов терминов")
         _bulk_resolve("term")
+        logger.info("[TASK] [RESOLVE] [FINISH] Термины")
     except Exception as exc:
-        logger.warning(
-            f"Ошибка при разрешении терминологичных конфликтов, пробую еще раз: {exc}"
-        )
+        logger.warning(f"[TASK] [RESOLVE] [RETRY] Термины, причина: {exc}")
         raise self.retry(exc=exc)
     finally:
         trace_id_var.reset(token)
@@ -103,11 +110,11 @@ def bulk_resolve_terms(self, trace_id: str = "unknown") -> None:
 def bulk_resolve_abbrs(self, trace_id: str = "unknown") -> None:
     token = trace_id_var.set(trace_id)
     try:
+        logger.info("[TASK] [RESOLVE] [START] Разрешение конфликтов аббревиатур")
         _bulk_resolve("abbr")
+        logger.info("[TASK] [RESOLVE] [FINISH] Аббревиатуры")
     except Exception as exc:
-        logger.warning(
-            f"Ошибка при разрешении аббревиатурных конфликтов, пробую еще раз: {exc}"
-        )
+        logger.warning(f"[TASK] [RESOLVE] [RETRY] Аббревиатуры, причина: {exc}")
         raise self.retry(exc=exc)
     finally:
         trace_id_var.reset(token)

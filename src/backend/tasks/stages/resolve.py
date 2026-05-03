@@ -17,7 +17,12 @@ async def resolve_items(
     conflicts: dict[str, list[str]], item_type: str
 ) -> dict[str, str]:
     if not conflicts:
+        logger.info(f"[RESOLVE] [START] {item_type}: конфликтов нет")
         return {}
+
+    logger.info(
+        f"[RESOLVE] [START] {item_type}: конфликтов {len(conflicts)}"
+    )
 
     stage = f"resolve_{item_type}"
     instructions = config["llm"][stage]["instructions"]
@@ -35,7 +40,7 @@ async def resolve_items(
                 )
 
                 logger.info(
-                    f"[RESOLVE] [LLM_START] запрос: {item_type} | {word} (вариантов: {len(conflicts[word])})"
+                    f"[RESOLVE] [LLM] [REQUEST] {item_type} '{word}' вариантов: {len(conflicts[word])}"
                 )
 
                 raw = await model.generate_async(session, prompt, stage=stage)
@@ -50,12 +55,23 @@ async def resolve_items(
                 results[word] = final_val if final_val else conflicts[word][0]
 
                 logger.info(
-                    f"[RESOLVE] [LLM_END] {item_type} | Для слова {word} получено значение: {(results[word])[:20]}"
+                    f"[RESOLVE] [LLM] [RESPONSE] {item_type} '{word}' успешно разрешено"
                 )
 
-            except Exception as e:
+            except aiohttp.ClientError as e:
                 logger.warning(
-                    f"[RESOLVE] [LLM_ERROR] Ошибка {word}: {e}. Берем первый вариант."
+                    f"[RESOLVE] [LLM] [ERROR] Сетевая ошибка для '{word}': {e}. Использую первый вариант."
+                )
+                results[word] = conflicts[word][0]
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning(
+                    f"[RESOLVE] [LLM] [ERROR] Ошибка парсинга ответа для '{word}': {e}. Использую первый вариант."
+                )
+                results[word] = conflicts[word][0]
+            except Exception as e:
+                logger.error(
+                    f"[RESOLVE] [LLM] [ERROR] Неожиданная ошибка для '{word}': {e}",
+                    exc_info=True,
                 )
                 results[word] = conflicts[word][0]
 
@@ -63,4 +79,7 @@ async def resolve_items(
     async with aiohttp.ClientSession(connector=connector) as session:
         await asyncio.gather(*[resolve_one(session, w) for w in keys])
 
+    logger.info(
+        f"[RESOLVE] [FINISH] {item_type}: разрешено {len(results)} из {len(conflicts)}"
+    )
     return results

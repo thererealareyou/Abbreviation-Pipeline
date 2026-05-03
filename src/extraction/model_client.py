@@ -33,6 +33,10 @@ class AsyncAPIModelClient:
         self.endpoint = endpoint
         self.temperature = temperature
         self.semaphore = asyncio.Semaphore(max_parallel)
+        logger.info(
+            f"[LLM] [INIT] Создан клиент LLM: url={url}, endpoint={endpoint}, "
+            f"temperature={temperature}, max_parallel={max_parallel}"
+        )
 
     async def generate_async(
         self, session: aiohttp.ClientSession, prompt: str, stage: str
@@ -65,6 +69,10 @@ class AsyncAPIModelClient:
             "cache_prompt": True,
         }
 
+        logger.info(
+            f"[LLM] [REQUEST] Этап: {stage}, длина промпта: {len(prompt)} символов"
+        )
+
         async with self.semaphore:
             try:
                 endpoint = f"{self.url}/{self.endpoint}"
@@ -73,16 +81,29 @@ class AsyncAPIModelClient:
                     if response.status != 200:
                         error_text = await response.text()
                         logger.error(
-                            f"\n[HTTP ОШИБКА {response.status} на этапе {stage}]. Ответ сервера: {error_text}"
+                            f"[LLM] [RESPONSE] [ERROR] HTTP {response.status} на этапе {stage}: {error_text}"
                         )
                         logger.debug(f"Сломанный промпт: {prompt[:200]}...")
                         return "[]"
 
                     res_json = await response.json()
+                    content = res_json["choices"][0]["message"]["content"]
+                    logger.info(
+                        f"[LLM] [RESPONSE] Этап: {stage}, длина ответа: {len(content)} символов"
+                    )
                     return res_json["choices"][0]["message"]["content"]
 
+            except aiohttp.ClientError as e:
+                logger.error(
+                    f"[LLM] [REQUEST] [ERROR] Ошибка соединения с LLM ({self.url}) на этапе {stage}: {e}",
+                    exc_info=True,
+                )
+                return "[]"
             except Exception as e:
-                logger.error(f"[Критическая ошибка aiohttp]: {e}")
+                logger.error(
+                    f"[LLM] [REQUEST] [ERROR] Неожиданная ошибка при запросе к LLM на этапе {stage}: {e}",
+                    exc_info=True,
+                )
                 return "[]"
 
 
@@ -101,12 +122,16 @@ def get_llm_client():
             max_parallel=8,
         )
     except Exception as e:
+        logger.error(
+            f"[LLM] [INIT] [ERROR] Не удалось создать клиент LLM: {e}",
+            exc_info=True,
+        )
         logger.error(f"Ошибка при получении экземпляра клиента LLM: {e}")
 
 
 def parse_llm_definition_response(response_text: str) -> str | None:
     try:
-        match = re.search(r"\{.*?\}", response_text, re.DOTALL)
+        match = re.search(r"{.*?}", response_text, re.DOTALL)
         if not match:
             return None
 
@@ -116,7 +141,7 @@ def parse_llm_definition_response(response_text: str) -> str | None:
         if data.get("has_definition") and exp:
             return str(exp).strip()
     except Exception as e:
-        logger.error(f"[PARSE DEF] Ошибка парсинга: {e}")
+        logger.error(f"[DEFINE] [PARSE] [ERROR] Ошибка парсинга определения: {e}")
         return None
     return None
 
@@ -125,12 +150,12 @@ def parse_llm_extraction_response(response_text: str) -> list[str]:
     if not response_text:
         return []
     try:
-        match = re.search(r"\[.*?\]", response_text, re.DOTALL)
+        match = re.search(r"[.*?]", response_text, re.DOTALL)
         if not match:
             return []
 
         data = json.loads(match.group(0))
         return [str(item).strip() for item in data if item]
     except Exception as e:
-        logger.error(f"[PARSE EXTRACT] Ошибка: {e}")
+        logger.error(f"[EXTRACT] [PARSE] [ERROR] Ошибка парсинга извлечения: {e}")
         return []

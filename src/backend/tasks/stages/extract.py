@@ -6,6 +6,7 @@ import aiohttp
 import yaml
 from celery.utils.log import get_task_logger
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import config
 from src.backend.models import Chunk, Document, ExtractedItem
@@ -31,6 +32,10 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
     instructions = prompts["llm"][stage]["instructions"]
     model = get_llm_client()
 
+    logger.info(
+        f"[EXTRACT] [START] doc_id={doc_id}, type={item_type}, chunks={len(chunks)}"
+    )
+
     sem = asyncio.Semaphore(5)
 
     async def process_one(session, chunk: Chunk):
@@ -41,10 +46,6 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                 text = re.sub(r"\s+", " ", text).strip()
                 prompt = instructions.format(chunk_text=text)
                 raw = await model.generate_async(session, prompt, stage=stage)
-
-                logger.info(
-                    f"[EXTRACT] [LLM_START] Отправляю запрос | {item_type} | {text[:25]}."
-                )
 
                 if not raw:
                     return []
@@ -67,8 +68,17 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                     for word in found_words
                     if word.strip()
                 ]
+
+            except aiohttp.ClientError as e:
+                logger.error(
+                    f"[EXTRACT] [LLM] [ERROR] Сетевая ошибка в чанке id={chunk.id}: {e}"
+                )
+                return []
             except Exception as e:
-                logger.error(f"[EXTRACT] [LLM_ERROR] Ошибка в чанке id={chunk.id}: {e}")
+                logger.error(
+                    f"[EXTRACT] [LLM] [ERROR] Ошибка в чанке id={chunk.id}: {e}",
+                    exc_info=True,
+                )
                 return []
 
     async with aiohttp.ClientSession() as session:
@@ -118,11 +128,20 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
                         bulk_define_terms.delay(doc_id, batch_ids)
 
                 logger.info(
-                    f"[EXTRACT] [LLM_END] doc_id={doc_id}: Обработано {len(chunks)} чанков. "
-                    f"Найдено {len(all_new_items)} {item_type}."
+                    f"[EXTRACT] [FINISH] doc_id={doc_id}: обработано чанков={len(chunks)}, найдено {item_type}={len(all_new_items)}"
                 )
+
+            except SQLAlchemyError as e:
+                db.rollback()
+                logger.error(
+                    f"[EXTRACT] [DB] [ERROR] Ошибка БД для doc_id={doc_id}: {e}",
+                    exc_info=True,
+                )
+                raise
             except Exception as e:
                 db.rollback()
                 logger.error(
-                    f"[EXTRACT] [LLM_ERROR] Ошибка БД для doc_id={doc_id}: {e}"
+                    f"[EXTRACT] [ERROR] Неожиданная ошибка для doc_id={doc_id}: {e}",
+                    exc_info=True,
                 )
+                raise

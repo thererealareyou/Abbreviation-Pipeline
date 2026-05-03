@@ -5,6 +5,7 @@ import aiohttp
 import yaml
 from celery.utils.log import get_task_logger
 from sqlalchemy import update
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.backend.models import Document, ExtractedItem
 from src.extraction.model_client import (get_llm_client,
@@ -47,13 +48,22 @@ def _sync_save_definitions_and_progress(
             )
             db.commit()
             logger.info(
-                f"[DEFINE] [FINISH] doc_id={doc_id}: Успешно сохранено {len(results)} определений ({item_type})."
+                f"[DEFINE] [FINISH] [DB] doc_id={doc_id}: сохранено определений={len(results)} ({item_type})"
             )
+        except SQLAlchemyError as e:
+            db.rollback()
+            logger.error(
+                f"[DEFINE] [DB] [ERROR] Ошибка БД при сохранении определений doc_id={doc_id}: {e}",
+                exc_info=True,
+            )
+            raise
         except Exception as e:
             db.rollback()
             logger.error(
-                f"[DEFINE] [ERROR] Ошибка БД при сохранении для doc_id={doc_id}: {e}"
+                f"[DEFINE] [ERROR] Неожиданная ошибка при сохранении doc_id={doc_id}: {e}",
+                exc_info=True,
             )
+            raise
 
 
 async def define_items(
@@ -65,6 +75,10 @@ async def define_items(
     instructions = prompts["llm"][stage]["instructions"]
     model = get_llm_client()
 
+    logger.info(
+        f"[DEFINE] [START] doc_id={doc_id}, type={item_type}, items={len(items_with_context)}"
+    )
+
     sem = asyncio.Semaphore(5)
 
     async def process_one(session, item_id: int, word: str, chunk_text: str):
@@ -72,10 +86,6 @@ async def define_items(
             try:
                 prompt = instructions.format(chunk_text=chunk_text, item=word)
                 raw = await model.generate_async(session, prompt, stage=stage)
-
-                logger.info(
-                    f"[DEFINE] [LLM_START] Отправляю запрос | {item_type} | {word} | {chunk_text[:25]}."
-                )
 
                 if not raw:
                     return item_id, ""
@@ -89,9 +99,18 @@ async def define_items(
                 if is_valid:
                     return item_id, definition
                 return item_id, ""
+
+            except aiohttp.ClientError as e:
+                logger.error(
+                    f"[DEFINE] [LLM] [ERROR] Сетевая ошибка для '{word}' (id={item_id}): {e}"
+                )
+                return item_id, ""
             except Exception as e:
-                logger.error(f"[DEFINE] [ERROR] Ошибка LLM для word='{word}': {e}")
-                return item_id, "Определение не найдено"
+                logger.error(
+                    f"[DEFINE] [LLM] [ERROR] Ошибка LLM для '{word}' (id={item_id}): {e}",
+                    exc_info=True,
+                )
+                return item_id, ""
 
     async with aiohttp.ClientSession() as session:
         tasks = [
@@ -103,11 +122,15 @@ async def define_items(
     results = {res[0]: res[1] for res in raw_results if res is not None}
 
     if results:
-        logger.info(f"[DEFINE] [LLM_END] Получено определений: {len(results)}.")
+        logger.info(f"[DEFINE] [LLM] [END] Получено определений: {len(results)}")
         await asyncio.to_thread(
             _sync_save_definitions_and_progress,
             results,
             doc_id,
             item_type,
             len(items_with_context),
+        )
+    else:
+        logger.info(
+            f"[DEFINE] [FINISH] [EMPTY] doc_id={doc_id}: не получено ни одного определения"
         )

@@ -8,6 +8,7 @@ from celery.utils.log import get_task_logger
 from sqlalchemy import func, update
 from sqlalchemy.dialects.postgresql import insert as pg_upsert
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from config import config
 from src.backend.models import (Chunk, Document, ExtractedItem,
@@ -18,7 +19,7 @@ from src.backend.tasks.stages.resolve import resolve_items
 from src.extraction.transliteration import build_transliteration_map
 from src.utils.db import SessionLocal, update_system_status
 
-task_logger = get_task_logger(__name__)
+logger = get_task_logger(__name__)
 
 app = Celery("nlp_pipeline", broker=config.CELERY_BROKER_URL)
 
@@ -39,15 +40,15 @@ _CONFLICTS_DONE_FLAG = {"term": "term_conflicts_done", "abbr": "abbr_conflicts_d
 
 
 def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> None:
-    task_logger.info(
-        f"[EXTRACT] [START] Начат батч {item_type} для doc_id={doc_id}. Чанков в батче: {len(chunk_ids)}"
+    logger.info(
+        f"[EXTRACT] [BATCH] [START] doc_id={doc_id}, type={item_type}, chunks_in_batch={len(chunk_ids)}"
     )
     db = SessionLocal()
     try:
         chunks = db.query(Chunk).filter(Chunk.id.in_(chunk_ids)).all()
         if not chunks:
-            task_logger.warning(
-                f"[EXTRACT] [EMPTY] doc_id={doc_id}: Чанки не найдены в БД, пропускаем."
+            logger.warning(
+                f"[EXTRACT] [BATCH] [EMPTY] doc_id={doc_id}: чанки не найдены, пропуск"
             )
             return
 
@@ -57,8 +58,8 @@ def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> Non
         batches_done = getattr(doc, f"{item_type}_batches_done")
         batches_total = getattr(doc, f"{item_type}_batches_total")
 
-        task_logger.info(
-            f"[EXTRACT] [FINISH] doc_id={doc_id} {item_type} | Батч завершен: {batches_done}/{batches_total}"
+        logger.info(
+            f"[EXTRACT] [BATCH] [FINISH] doc_id={doc_id}, type={item_type}, прогресс: {batches_done}/{batches_total}"
         )
 
         if batches_done >= batches_total:
@@ -89,13 +90,23 @@ def _bulk_extract(doc_id: int, chunk_ids: list[int], item_type: ItemType) -> Non
                     setattr(locked_doc, defining_done_flag, True)
                     if getattr(locked_doc, inverse_defining_done_flag) is True:
                         setattr(locked_doc, "status", "completed")
+                        logger.info(
+                            f"[DOC] [STATUS] [COMPLETED] doc_id={doc_id}: все этапы завершены"
+                        )
                 db.commit()
             else:
                 db.rollback()
 
+    except SQLAlchemyError as e:
+        logger.error(
+            f"[EXTRACT] [BATCH] [ERROR] Ошибка БД doc_id={doc_id}, type={item_type}: {e}",
+            exc_info=True,
+        )
+        db.rollback()
+        raise
     except Exception as e:
-        task_logger.error(
-            f"[EXTRACT] [ERROR] Критическая ошибка doc_id={doc_id}, type={item_type}: {e}",
+        logger.error(
+            f"[EXTRACT] [BATCH] [ERROR] Неожиданная ошибка doc_id={doc_id}, type={item_type}: {e}",
             exc_info=True,
         )
         db.rollback()
@@ -139,8 +150,8 @@ def _bulk_define(doc_id: int, item_ids: list[int], item_type: str) -> None:
 
         if is_search_finished and 0 < total_found <= items_processed:
             if not getattr(doc, defs_done_flag):
-                task_logger.info(
-                    f"[COMPLETE] Этап Define ({item_type}) завершен. Обработано: {items_processed}/{total_found}"
+                logger.info(
+                    f"[DEFINE] [BATCH] [COMPLETE] Этап Define ({item_type}) завершён: обработано {items_processed}/{total_found}"
                 )
                 setattr(doc, defs_done_flag, True)
 
@@ -153,6 +164,7 @@ def _bulk_define(doc_id: int, item_ids: list[int], item_type: str) -> None:
 
             if terms_done and abbrs_done:
                 setattr(doc, "status", "completed")
+                logger.info(f"[DOC] [STATUS] [COMPLETED] doc_id={doc_id}: документ завершён")
 
         elif is_search_finished and total_found == 0:
             setattr(doc, defs_done_flag, True)
@@ -166,11 +178,12 @@ def _bulk_define(doc_id: int, item_ids: list[int], item_type: str) -> None:
 
             if terms_done and abbrs_done:
                 setattr(doc, "status", "completed")
+                logger.info(f"[DOC] [STATUS] [COMPLETED] doc_id={doc_id}: документ завершён (нет элементов)")
 
         db.commit()
 
-    task_logger.info(
-        f"[DEFINE] [START] Проверка батча для doc_id={doc_id}, тип={item_type}"
+    logger.info(
+        f"[DEFINE] [BATCH] [START] doc_id={doc_id}, type={item_type}, items_in_batch={len(item_ids)}"
     )
 
     with SessionLocal() as db:
@@ -185,9 +198,11 @@ def _bulk_define(doc_id: int, item_ids: list[int], item_type: str) -> None:
             )
 
             if not rows:
+                logger.info(f"[DEFINE] [BATCH] [EMPTY] doc_id={doc_id}: нет элементов для обработки")
                 return
 
             actual_locked_ids = [r.id for r in rows]
+            logger.debug(f"[DEFINE] [BATCH] [LOCKED] Заблокировано элементов: {len(actual_locked_ids)}")
 
             asyncio.run(define_items(doc_id, rows, item_type))
 
@@ -200,18 +215,28 @@ def _bulk_define(doc_id: int, item_ids: list[int], item_type: str) -> None:
             _check_and_set_define_finish(db, doc_id, item_type)
 
             db.commit()
-            task_logger.info(
-                f"[DEFINE] [SUCCESS] Обработано {len(actual_locked_ids)} элементов."
+            logger.info(
+                f"[DEFINE] [BATCH] [FINISH] doc_id={doc_id}, type={item_type}, обработано {len(actual_locked_ids)} элементов"
             )
+
+        except SQLAlchemyError as e:
+            logger.error(
+                f"[DEFINE] [BATCH] [ERROR] Ошибка БД doc_id={doc_id}, type={item_type}: {e}",
+                exc_info=True,
+            )
+            db.rollback()
+            raise
         except Exception as e:
-            task_logger.error(
-                f"[DEFINE] [ERROR] Произошла ошибка при определении элементов. +{e}"
+            logger.error(
+                f"[DEFINE] [BATCH] [ERROR] Неожиданная ошибка doc_id={doc_id}, type={item_type}: {e}",
+                exc_info=True,
             )
+            db.rollback()
             raise
 
 
 def _bulk_resolve(item_type: ItemType) -> None:
-    task_logger.info(f"[RESOLVE] [GLOBAL] Запуск сборки словаря для типа: {item_type}")
+    logger.info(f"[RESOLVE] [GLOBAL] [START] Запуск сборки глобального словаря для {item_type}")
     update_system_status(f"build_{item_type}", "processing")
     db = SessionLocal()
     try:
@@ -230,17 +255,18 @@ def _bulk_resolve(item_type: ItemType) -> None:
         conflicts = {w: list(defs) for w, defs in grouped.items() if len(defs) > 1}
         ready_map = {w: list(defs)[0] for w, defs in grouped.items() if len(defs) == 1}
 
-        task_logger.info(
-            f"[RESOLVE] [GLOBAL] Всего {len(grouped)} уникальных {item_type}. Конфликтов: {len(conflicts)}"
+        logger.info(
+            f"[RESOLVE] [GLOBAL] [STATS] Всего уникальных {item_type}: {len(grouped)}, конфликтов: {len(conflicts)}"
         )
 
         if conflicts:
             resolved_map = asyncio.run(resolve_items(conflicts, item_type))
             ready_map.update(resolved_map)
+            logger.info(f"[RESOLVE] [GLOBAL] [RESOLVED] Конфликтов разрешено: {len(conflicts)}")
 
         if ready_map:
-            task_logger.info(
-                f"[RESOLVE] [GLOBAL] Синхронизация {len(ready_map)} записей с GlobalDictionary."
+            logger.info(
+                f"[RESOLVE] [GLOBAL] [SYNC] Синхронизация {len(ready_map)} записей с GlobalDictionary"
             )
 
             for word in sorted(ready_map.keys()):
@@ -261,21 +287,28 @@ def _bulk_resolve(item_type: ItemType) -> None:
         ).update({"is_final": True}, synchronize_session=False)
         db.commit()
 
-        task_logger.info(
-            f"[RESOLVE] [GLOBAL] Глобальный словарь ({item_type}) успешно обновлен."
-        )
+        logger.info(f"[RESOLVE] [GLOBAL] [FINISH] Словарь {item_type} готов")
 
         if item_type == "abbr":
-            task_logger.info(
-                "[RESOLVE] [GLOBAL] Запускаю построение транслитерационного словаря."
-            )
+            logger.info("[TRANSLITERATE] [GLOBAL] [START] Запуск построения транслитерационного словаря")
             abbreviations = list(ready_map.keys())
             _bulk_transliteration(abbreviations, 6)
 
         update_system_status(f"build_{item_type}", "ready")
 
+    except SQLAlchemyError as e:
+        logger.error(
+            f"[RESOLVE] [GLOBAL] [ERROR] Ошибка БД при сборке словаря {item_type}: {e}",
+            exc_info=True,
+        )
+        update_system_status(f"build_{item_type}", "error", error=str(e))
+        db.rollback()
+        raise
     except Exception as e:
-        task_logger.error(f"[RESOLVE] [GLOBAL] Критическая ошибка: {e}", exc_info=True)
+        logger.error(
+            f"[RESOLVE] [GLOBAL] [ERROR] Неожиданная ошибка при сборке словаря {item_type}: {e}",
+            exc_info=True,
+        )
         update_system_status(f"build_{item_type}", "error", error=str(e))
         db.rollback()
         raise
@@ -284,24 +317,21 @@ def _bulk_resolve(item_type: ItemType) -> None:
 
 
 def _bulk_transliteration(abbreviations: List[str], max_length: int = 6) -> None:
-    task_logger.info("[TRANSLITERATE] Запуск для всей базы данных")
+    logger.info(
+        f"[TRANSLITERATE] [GLOBAL] [START] Построение транслитераций для {len(abbreviations)} аббревиатур"
+    )
     db = SessionLocal()
     try:
         doc = db.query(Document).with_for_update().first()
 
         if not abbreviations:
-            task_logger.info(
-                "[TRANSLITERATE] В словаре нет аббревиатур для транслитерации. Финализация словаря."
-            )
+            logger.info("[TRANSLITERATE] [GLOBAL] [EMPTY] Нет аббревиатур, завершение")
             doc.status = "completed"
             db.commit()
             return
 
-        task_logger.info(
-            f"[TRANSLITERATE] Построение вариантов для {len(abbreviations)} аббревиатур."
-        )
         translit_map = build_transliteration_map(abbreviations, max_length)
-        task_logger.info(f"[TRANSLITERATE] Построено {len(translit_map)} записей.")
+        logger.info(f"[TRANSLITERATE] [GLOBAL] [BUILD] Построено {len(translit_map)} вариантов")
 
         db.query(TransliterationDictionary).delete()
         db.bulk_save_objects(
@@ -312,11 +342,18 @@ def _bulk_transliteration(abbreviations: List[str], max_length: int = 6) -> None
         )
 
         db.commit()
-        task_logger.info("[TRANSLITERATE] Словарь полностью обработан.")
+        logger.info("[TRANSLITERATE] [GLOBAL] [FINISH] Транслитерационный словарь сохранён")
 
+    except SQLAlchemyError as e:
+        logger.error(
+            f"[TRANSLITERATE] [GLOBAL] [ERROR] Ошибка БД: {e}",
+            exc_info=True,
+        )
+        db.rollback()
+        raise
     except Exception as e:
-        task_logger.error(
-            f"[TRANSLITERATE] Ошибка при построении транслитерации словаря: {e}",
+        logger.error(
+            f"[TRANSLITERATE] [GLOBAL] [ERROR] Неожиданная ошибка: {e}",
             exc_info=True,
         )
         db.rollback()

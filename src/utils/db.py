@@ -12,8 +12,8 @@ engine = create_engine(
     config.DATABASE_URL,
     json_serializer=lambda obj: __import__("json").dumps(obj, ensure_ascii=False),
 )
-
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
 
 
 def get_db():
