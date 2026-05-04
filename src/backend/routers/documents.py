@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from config import config
 from src.backend.models import Chunk, Document, ExtractedItem
@@ -117,11 +117,11 @@ def start_extraction(payload: TextsRequest, db: Session = Depends(get_db)):
             try:
                 doc.status = "error"
                 db.commit()
-                logger.warning(f"[DOC] [EXTRACT] [RECOVER] Статус документа изменён на 'error'")
+                logger.warning("[DOC] [EXTRACT] [RECOVER] Статус документа изменён на 'error'")
             except Exception:
                 db.rollback()
                 logger.error(
-                    f"[DOC] [EXTRACT] [ERROR] Не удалось обновить статус документа на 'error'"
+                    "[DOC] [EXTRACT] [ERROR] Не удалось обновить статус документа на 'error'"
                 )
                 raise HTTPException(
                     status_code=500,

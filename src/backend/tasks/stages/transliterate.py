@@ -1,5 +1,4 @@
 from celery.utils.log import get_task_logger
-
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.backend.models import (Chunk, Document, ExtractedItem,

@@ -7,8 +7,8 @@ from celery import Celery
 from celery.utils.log import get_task_logger
 from sqlalchemy import func, update
 from sqlalchemy.dialects.postgresql import insert as pg_upsert
-from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from config import config
 from src.backend.models import (Chunk, Document, ExtractedItem,

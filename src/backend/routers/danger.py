@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
-from src.backend.models import Document, Chunk, ExtractedItem
+from src.backend.models import Chunk, Document, ExtractedItem
 from src.backend.schemas import ResetRequest
 from src.utils.db import get_db
 from src.utils.logger import PipelineLogger

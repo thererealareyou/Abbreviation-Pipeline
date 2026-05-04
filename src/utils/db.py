@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine, func
 from sqlalchemy.dialects.postgresql import insert
-from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
 
 from config import config
 from src.backend.models import SystemState
