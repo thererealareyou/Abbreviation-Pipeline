@@ -1,26 +1,33 @@
-from fastapi import APIRouter, Depends, HTTPException
+from arq import create_pool
+from arq.connections import RedisSettings
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import config
+from config import config, DOCUMENT_PIPELINE_CONFIG
+import uuid
 from src.backend.models import Chunk, Document, ExtractedItem
 from src.backend.schemas import TextsRequest
-from src.backend.tasks.public import bulk_extract_abbrs, bulk_extract_terms
+from src.backend.tasks.manager import pipeline_manager
 from src.utils.db import get_db
 from src.utils.logger import PipelineLogger
 
 router = APIRouter(prefix="/documents")
 logger = PipelineLogger.get_logger(__name__)
 
+CHUNK_BATCH = config.BATCH_SIZE
+
 
 @router.post("/extract")
-def start_extraction(payload: TextsRequest, db: Session = Depends(get_db)):
+async def start_extraction(payload: TextsRequest, request: Request, db: AsyncSession = Depends(get_db)):
     """
     Принимает массив текстовых чанков и запускает пайплайн извлечения. Выполнение этой функции может занять некоторое время.
     """
+    trace_id = str(uuid.uuid4())
+
     logger.info(
-        f"[DOC] [EXTRACT] [REQUEST] Запрос на извлечение: doc_id={payload.document_id}, texts={len(payload.texts)}"
+        f"[DOC] [EXTRACT] [REQUEST] Запрос на извлечение: doc_id={payload.document_id}, texts={len(payload.texts)}, trace_id={trace_id}"
     )
 
     if not payload.texts:
@@ -30,10 +37,9 @@ def start_extraction(payload: TextsRequest, db: Session = Depends(get_db)):
         )
 
     try:
-        CHUNK_BATCH = config.BATCH_SIZE
-
         stmt = select(Document).where(Document.filename == payload.document_id)
-        doc = db.execute(stmt).scalar_one_or_none()
+        rslt = await db.execute(stmt)
+        doc = rslt.scalar_one_or_none()
 
         if doc:
             logger.info(f"[DOC] [EXTRACT] [LOOKUP] Найден документ id={doc.id}, статус={doc.status}")
@@ -46,7 +52,7 @@ def start_extraction(payload: TextsRequest, db: Session = Depends(get_db)):
                 )
 
             logger.info(f"[DOC] [EXTRACT] [CLEAN] Удаление старых чанков для doc_id={doc.id}")
-            db.execute(delete(Chunk).where(Chunk.doc_id == doc.id))
+            await db.execute(delete(Chunk).where(Chunk.doc_id == doc.id))
             doc.status = "processing"
             doc.term_search_done = False
             doc.abbr_search_done = False
@@ -75,51 +81,49 @@ def start_extraction(payload: TextsRequest, db: Session = Depends(get_db)):
             logger.info(f"[DOC] [EXTRACT] [NEW] Создание нового документа {payload.document_id}")
             doc = Document(filename=payload.document_id, status="processing")
             db.add(doc)
+        await db.flush()
 
-        db.flush()
         new_chunks = [
-            Chunk(doc_id=doc.id, text=text_content, order=idx)
+            Chunk(doc_id=doc.id, text=text_content, order=idx)  # type: ignore
             for idx, text_content in enumerate(payload.texts)
         ]
         db.add_all(new_chunks)
-        db.flush()
+        await db.flush()
+
         logger.info(f"[DOC] [EXTRACT] [CHUNKS] Создано чанков: {len(new_chunks)}")
 
         total_batches = (len(payload.texts) + CHUNK_BATCH - 1) // CHUNK_BATCH
         doc.term_batches_total = total_batches
         doc.abbr_batches_total = total_batches
-        db.commit()
+        await db.commit()
+
         logger.info(
             f"[DOC] [EXTRACT] [BATCH] Всего батчей: {total_batches} (размер батча: {CHUNK_BATCH})"
         )
 
-        stmt = select(Chunk.id).where(Chunk.doc_id == doc.id).order_by(Chunk.order)
-        all_chunk_ids = db.scalars(stmt).all()
+        arq_pool = request.app.state.arq_pool
 
-        task_count_abbr = 0
-        task_count_term = 0
         try:
-            for i in range(0, len(all_chunk_ids), CHUNK_BATCH):
-                batch = list(all_chunk_ids[i : i + CHUNK_BATCH])
-                bulk_extract_terms.delay(doc.id, batch)
-                bulk_extract_abbrs.delay(doc.id, batch)
-                task_count_term += 1
-                task_count_abbr += 1
-            logger.info(
-                f"[DOC] [EXTRACT] [TASKS] Запланировано задач: термины={task_count_term}, аббревиатуры={task_count_abbr}"
+            await pipeline_manager.start(
+                redis=arq_pool,
+                db=db,
+                doc_id=doc.id,
+                config=DOCUMENT_PIPELINE_CONFIG,
+                trace_id=trace_id
             )
+            logger.info(f"[DOC] [EXTRACT] [SUCCESS] Пайплайн успешно инициализирован для doc_id={doc.id}")
 
         except Exception as task_err:
             logger.error(
-                f"[DOC] [EXTRACT] [ERROR] Ошибка при отправке Celery-задач для doc_id={doc.id}: {task_err}",
+                f"[DOC] [EXTRACT] [ERROR] Ошибка при отправке ARQ-задач для doc_id={doc.id}: {task_err}",
                 exc_info=True,
             )
             try:
                 doc.status = "error"
-                db.commit()
+                await db.commit()
                 logger.warning("[DOC] [EXTRACT] [RECOVER] Статус документа изменён на 'error'")
             except Exception:
-                db.rollback()
+                await db.rollback()
                 logger.error(
                     "[DOC] [EXTRACT] [ERROR] Не удалось обновить статус документа на 'error'"
                 )
@@ -137,14 +141,14 @@ def start_extraction(payload: TextsRequest, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except SQLAlchemyError as e:
-        db.rollback()
+        await db.rollback()
         logger.error(
             f"[DOC] [EXTRACT] [ERROR] Ошибка БД при запуске пайплайна для {payload.document_id}: {e}",
             exc_info=True,
         )
         raise HTTPException(status_code=500, detail="Ошибка базы данных при запуске пайплайна")
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logger.error(
             f"[DOC] [EXTRACT] [ERROR] Неожиданная ошибка: {e}",
             exc_info=True,
@@ -153,12 +157,12 @@ def start_extraction(payload: TextsRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/result/{document_id}")
-def get_result(
-    document_id: str,
-    target: str,
-    limit: int = 100,
-    offset: int = 0,
-    db: Session = Depends(get_db),
+async def get_result(
+        document_id: str,
+        target: str,
+        limit: int = 100,
+        offset: int = 0,
+        db: AsyncSession = Depends(get_db),
 ):
     """
     Возвращает итоговый словарь или транслитерационную таблицу для документа.
@@ -195,7 +199,10 @@ def get_result(
         )
 
     try:
-        doc = db.query(Document).filter_by(filename=document_id).first()
+        stmt = select(Document).where(Document.filename == document_id)
+        rslt = await db.execute(stmt)
+        doc = rslt.scalar_one_or_none()
+
         if not doc:
             logger.warning(f"[DOC] [RESULT] [LOOKUP] Документ {document_id} не найден")
             raise HTTPException(status_code=404, detail="Документ не найден.")
@@ -220,8 +227,9 @@ def get_result(
             .offset(offset)
             .limit(limit)
         )
-        result = db.execute(stmt).all()
-        data = {row.word: row.definition for row in result}
+        rslt = await db.execute(stmt)
+        rows = rslt.all()
+        data = {row.word: row.definition for row in rows}
 
         logger.info(
             f"[DOC] [RESULT] [RESULT] Получено записей: {len(data)} для target={target}"
@@ -253,7 +261,7 @@ def get_result(
 
 
 @router.delete("/delete/{document_name}")
-def delete_document(document_name: str, db: Session = Depends(get_db)):
+async def delete_document(document_name: str, db: AsyncSession = Depends(get_db)):
     """
     Удаляет документ и все связанные с ним данные.
 
@@ -270,8 +278,8 @@ def delete_document(document_name: str, db: Session = Depends(get_db)):
 
     try:
         stmt = select(Document).where(Document.filename == document_name)
-        result = db.execute(stmt)
-        doc = result.scalar_one_or_none()
+        rslt = await db.execute(stmt)
+        doc = rslt.scalar_one_or_none()
 
         if not doc:
             logger.warning(f"[DOC] [DELETE] [LOOKUP] Документ {document_name} не найден")
@@ -289,8 +297,8 @@ def delete_document(document_name: str, db: Session = Depends(get_db)):
             )
 
         doc_id = doc.id
-        db.delete(doc)
-        db.commit()
+        await db.delete(doc)
+        await db.commit()
 
         logger.info(f"[DOC] [DELETE] [RESULT] Документ {document_name} (id={doc_id}) успешно удалён")
         return {
@@ -301,14 +309,14 @@ def delete_document(document_name: str, db: Session = Depends(get_db)):
     except HTTPException:
         raise
     except SQLAlchemyError as e:
-        db.rollback()
+        await db.rollback()
         logger.error(
             f"[DOC] [DELETE] [ERROR] Ошибка БД при удалении документа {document_name}: {e}",
             exc_info=True,
         )
         raise HTTPException(status_code=500, detail="Ошибка базы данных при удалении документа")
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         logger.error(
             f"[DOC] [DELETE] [ERROR] Неожиданная ошибка: {e}",
             exc_info=True,

@@ -1,31 +1,28 @@
-import logging
-
 import httpx
 from fastapi import APIRouter, Depends
-from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import text
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import config
 from src.utils.db import get_db
-
-logger = logging.getLogger(__name__)
+from src.utils.logger import PipelineLogger
 
 router = APIRouter(prefix="/system")
+logger = PipelineLogger.get_logger(__name__)
 
 
 @router.get("/health")
-async def check_health(db: Session = Depends(get_db)):
+async def check_health(db: AsyncSession = Depends(get_db)):
     """
     Проверяет доступность LLM-сервера и базы данных.
     Логирует ошибки при недоступности компонентов.
     """
-    llm_url = config.LLM_API_URL
+    llm_url = config.LLM_HEALTH_URL
     db_status = "ok"
     llm_status = "ok"
 
     try:
-        await run_in_threadpool(lambda: db.execute(text("SELECT 1")))
+        await db.execute(text("SELECT 1"))
     except Exception as e:
         logger.error(f"[SYSTEM] [HEALTH] Ошибка подключения к БД: {e}", exc_info=True)
         db_status = "error"
@@ -33,7 +30,7 @@ async def check_health(db: Session = Depends(get_db)):
     try:
         timeout = httpx.Timeout(connect=2.0, read=2.0, write=2.0, pool=2.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(f"{llm_url}/health")
+            response = await client.get(llm_url)
         if response.status_code != 200:
             llm_status = "busy"
             logger.warning(
@@ -52,10 +49,12 @@ async def check_health(db: Session = Depends(get_db)):
             exc_info=True,
         )
 
-    overall = "ok" if (db_status == "ok") else "error"
+    overall = "ok" if (db_status == "ok" and llm_status == "ok") else "error"
     if overall != "ok":
         logger.warning(
-            f"[SYSTEM] [HEALTH] Сервис нездоров: db={db_status}, llm={llm_status}"
+            f"[SYSTEM] [HEALTH] Сервис нездоров: db={db_status}, llm={llm_status}",
+            exc_info=True,
         )
-
+    else:
+        logger.info(f"[SYSTEM] [HEALTH] Сервис здоров!")
     return {"status": overall, "db": db_status, "llm": llm_status}

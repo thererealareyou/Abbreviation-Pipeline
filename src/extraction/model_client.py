@@ -18,28 +18,26 @@ class AsyncAPIModelClient:
     """Асинхронный клиент для обращения к локальному серверу (llama.cpp server) батчами."""
 
     def __init__(
-        self, url: str, endpoint: str, temperature: float, max_parallel: int
+            self, url: str, temperature: float, max_parallel: int
     ) -> None:
         """
         Args:
             url (str): URL-адрес API локального сервера.
-            endpoint (str): Эндпоинт обращения к локальному серверу.
             temperature (float): Параметр температуры для генерации ответов модели.
             max_parallel (int): Максимальное количество параллельных запросов к серверу
                 (ограничивается семафором).
         """
 
         self.url = url
-        self.endpoint = endpoint
         self.temperature = temperature
         self.semaphore = asyncio.Semaphore(max_parallel)
         logger.info(
-            f"[LLM] [INIT] Создан клиент LLM: url={url}, endpoint={endpoint}, "
+            f"[LLM] [INIT] Создан клиент LLM: url={url},"
             f"temperature={temperature}, max_parallel={max_parallel}"
         )
 
     async def generate_async(
-        self, session: aiohttp.ClientSession, prompt: str, stage: str
+            self, session: aiohttp.ClientSession, prompt: str, stage: str
     ) -> str:
         """Выполняет асинхронный запрос к LLM для генерации ответа.
 
@@ -75,9 +73,7 @@ class AsyncAPIModelClient:
 
         async with self.semaphore:
             try:
-                endpoint = f"{self.url}/{self.endpoint}"
-
-                async with session.post(endpoint, json=payload) as response:
+                async with session.post(self.url, json=payload) as response:
                     if response.status != 200:
                         error_text = await response.text()
                         logger.error(
@@ -89,7 +85,7 @@ class AsyncAPIModelClient:
                     res_json = await response.json()
                     content = res_json["choices"][0]["message"]["content"]
                     logger.info(
-                        f"[LLM] [RESPONSE] Этап: {stage}, длина ответа: {len(content)} символов"
+                        f"[LLM] [RESPONSE] Этап: {stage}, длина ответа: {len(content)} символов, ответ: {content[:200]}."
                     )
                     return res_json["choices"][0]["message"]["content"]
 
@@ -116,8 +112,7 @@ def get_llm_client():
     """
     try:
         return AsyncAPIModelClient(
-            url=config.LLM_API_URL,
-            endpoint=config.LLM_API_ENDPOINT,
+            url=config.LLM_CHAT_URL,
             temperature=0.0,
             max_parallel=8,
         )
@@ -147,15 +142,26 @@ def parse_llm_definition_response(response_text: str) -> str | None:
 
 
 def parse_llm_extraction_response(response_text: str) -> list[str]:
+    """Извлекает все уникальные строки из всех JSON-массивов, найденных в ответе модели."""
     if not response_text:
         return []
-    try:
-        match = re.search(r"[.*?]", response_text, re.DOTALL)
-        if not match:
-            return []
+    candidates = re.findall(r'\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\]', response_text)
+    items = []
+    for cand in candidates:
+        cand = cand.rstrip('.')
+        try:
+            parsed = json.loads(cand)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, str):
+                        items.append(item.strip())
+        except json.JSONDecodeError:
+            continue
 
-        data = json.loads(match.group(0))
-        return [str(item).strip() for item in data if item]
-    except Exception as e:
-        logger.error(f"[EXTRACT] [PARSE] [ERROR] Ошибка парсинга извлечения: {e}")
-        return []
+    seen = set()
+    unique = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique

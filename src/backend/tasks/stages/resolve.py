@@ -1,20 +1,23 @@
 import asyncio
 import json
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 import aiohttp
 import yaml
-from celery.utils.log import get_task_logger
+
+from src.utils.logger import PipelineLogger
 
 from src.extraction.model_client import get_llm_client
 
-logger = get_task_logger(__name__)
+logger = PipelineLogger.get_logger(__name__)
 
 with open("config/prompts.yaml", "r", encoding="utf-8") as f:
     config = yaml.safe_load(f)
 
 
 async def resolve_items(
-    conflicts: dict[str, list[str]], item_type: str
+        db: AsyncSession, conflicts: dict[str, list[str]], item_type: str
 ) -> dict[str, str]:
     if not conflicts:
         logger.info(f"[RESOLVE] [START] {item_type}: конфликтов нет")

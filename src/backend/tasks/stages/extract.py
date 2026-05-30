@@ -4,26 +4,28 @@ from typing import Literal
 
 import aiohttp
 import yaml
-from celery.utils.log import get_task_logger
 from sqlalchemy import update
 from sqlalchemy.exc import SQLAlchemyError
+from src.utils.logger import PipelineLogger
 
 from config import config
 from src.backend.models import Chunk, Document, ExtractedItem
 from src.extraction.model_client import (get_llm_client,
                                          parse_llm_extraction_response)
 from src.extraction.regex_detector import clean_abbr_list, clean_terms_list
-from src.utils.db import SessionLocal
+from src.utils.db import AsyncSessionLocal
 
-logger = get_task_logger(__name__)
+logger = PipelineLogger.get_logger(__name__)
 
 ItemType = Literal["term", "abbr"]
+
+BATCH_SIZE = config.BATCH_SIZE
 
 with open("config/prompts.yaml", "r", encoding="utf-8") as f:
     prompts = yaml.safe_load(f)
 
 
-async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -> None:
+async def extract_items(db, chunks: list[Chunk], item_type: ItemType, doc_id: int) -> None:
     """
     Этап экстракции: поиск терминов/аббревиатур в тексте чанков.
     На входе: список объектов Chunk из БД.
@@ -88,60 +90,41 @@ async def extract_items(chunks: list[Chunk], item_type: ItemType, doc_id: int) -
 
         all_new_items = [item for sublist in results for item in sublist]
 
-    if all_new_items or chunks:
-        with SessionLocal() as db:
-            try:
-                if all_new_items:
-                    db.add_all(all_new_items)
-                    db.flush()
+    try:
+        if all_new_items or chunks:
+            if all_new_items:
+                db.add_all(all_new_items)
+                await db.flush()
 
-                field_name = f"finding_{item_type}_chunks"
-                batch_field = f"{item_type}_batches_done"
+            field_name = f"finding_{item_type}_chunks"
+            batch_field = f"{item_type}_batches_done"
 
-                db.execute(
-                    update(Document)
-                    .where(Document.id == doc_id)
-                    .values(
-                        {
-                            field_name: getattr(Document, field_name) + len(chunks),
-                            batch_field: getattr(Document, batch_field) + 1,
-                        }
-                    )
+            await db.execute(
+                update(Document)
+                .where(Document.id == doc_id)
+                .values(
+                    {
+                        field_name: getattr(Document, field_name) + len(chunks),
+                        batch_field: getattr(Document, batch_field) + 1,
+                    }
                 )
+            )
 
-                db.commit()
+            logger.info(
+                f"[EXTRACT] [FINISH] doc_id={doc_id}: обработано чанков={len(chunks)}, найдено {item_type}={len(all_new_items)}"
+            )
 
-                BATCH_SIZE = config.BATCH_SIZE
-                new_item_ids = [item.id for item in all_new_items]
-
-                if item_type == "abbr":
-                    from src.backend.tasks.public import bulk_define_abbrs
-
-                    for i in range(0, len(new_item_ids), BATCH_SIZE):
-                        batch_ids = new_item_ids[i : i + BATCH_SIZE]
-                        bulk_define_abbrs.delay(doc_id, batch_ids)
-                else:
-                    from src.backend.tasks.public import bulk_define_terms
-
-                    for i in range(0, len(new_item_ids), BATCH_SIZE):
-                        batch_ids = new_item_ids[i : i + BATCH_SIZE]
-                        bulk_define_terms.delay(doc_id, batch_ids)
-
-                logger.info(
-                    f"[EXTRACT] [FINISH] doc_id={doc_id}: обработано чанков={len(chunks)}, найдено {item_type}={len(all_new_items)}"
-                )
-
-            except SQLAlchemyError as e:
-                db.rollback()
-                logger.error(
-                    f"[EXTRACT] [DB] [ERROR] Ошибка БД для doc_id={doc_id}: {e}",
-                    exc_info=True,
-                )
-                raise
-            except Exception as e:
-                db.rollback()
-                logger.error(
-                    f"[EXTRACT] [ERROR] Неожиданная ошибка для doc_id={doc_id}: {e}",
-                    exc_info=True,
-                )
-                raise
+    except SQLAlchemyError as e:
+        await db.rollback()
+        logger.error(
+            f"[EXTRACT] [DB] [ERROR] Ошибка БД для doc_id={doc_id}: {e}",
+            exc_info=True,
+        )
+        raise
+    except Exception as e:
+        await db.rollback()
+        logger.error(
+            f"[EXTRACT] [ERROR] Неожиданная ошибка для doc_id={doc_id}: {e}",
+            exc_info=True,
+        )
+        raise

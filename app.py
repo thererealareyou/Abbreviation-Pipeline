@@ -1,4 +1,10 @@
+from contextlib import asynccontextmanager
+
+from arq import create_pool, ArqRedis
+from arq.connections import RedisSettings
+from config import config
 import uuid
+import logging
 
 from fastapi import FastAPI, Request
 
@@ -7,9 +13,22 @@ from src.backend.routers import (danger, documents, global_dictionary, status,
                                  system)
 from src.utils.logger import trace_id_var
 
+from src.utils.logger import PipelineLogger
+
+PipelineLogger.setup_logging(level=logging.INFO)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    app.state.arq_pool = await create_pool(RedisSettings.from_dsn(config.REDIS_URL))
+    yield
+    await app.state.arq_pool.close()
+
+
 app = FastAPI(
     title="Автоматический извлекатель доменных аббревиатур (АИДА)",
     default_response_class=UnicodeJSONResponse,
+    lifespan=lifespan
 )
 
 

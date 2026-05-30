@@ -1,122 +1,102 @@
+from arq import ArqRedis
+from psycopg.errors import InvalidTextRepresentation
+from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import func, select
+from sqlalchemy import func, select, and_
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.backend.models import (Chunk, Document, ExtractedItem,
                                 GlobalDictionary, SystemState)
 from src.utils.db import get_db
 from src.utils.logger import PipelineLogger
+from src.utils.arq_utils import get_arq_pool
 
 router = APIRouter(prefix="/status")
 logger = PipelineLogger.get_logger(__name__)
 
 
 @router.get("/documents/detailed/{document_id}")
-def get_doc_status(document_id: str, db: Session = Depends(get_db)):
-    """
-    Возвращает детальный статус обработки документа.
-
-    Включает прогресс по каждому этапу пайплайна:
-    - finding: поиск аббревиатур и терминов в чанках.
-    - defining: поиск определений для найденных сущностей.
-    - conflicts: разрешение конфликтующих определений.
-
-    Args:
-        document_id: идентификатор документа.
-
-    Returns:
-        Полный статус документа с прогрессом по всем этапам.
-    """
-    logger.info(
-        f"[STATUS] [DOC] [REQUEST] Запрос статуса документа: {document_id}"
-    )
+async def get_doc_status(document_id: UUID,
+                         db: AsyncSession = Depends(get_db),
+                         redis: ArqRedis = Depends(get_arq_pool)
+                         ):
+    logger.info(f"[STATUS] [DOC] [REQUEST] Запрос статуса документа: {document_id}")
     try:
-        doc = db.query(Document).filter_by(filename=document_id).first()
+        stmt = select(Document).where(Document.id == document_id)
+        rslt = await db.execute(stmt)
+        doc = rslt.scalar_one_or_none()
+
         if not doc:
-            logger.warning(
-                f"[STATUS] [DOC] [LOOKUP] Документ с filename={document_id} не найден"
-            )
+            logger.warning(f"[STATUS] [DOC] [LOOKUP] Документ с id={document_id} не найден")
             raise HTTPException(status_code=404, detail="Документ не найден.")
 
-        logger.info(
-            f"[STATUS] [DOC] [LOOKUP] Документ найден: id={doc.id}, status={doc.status}"
+        status = doc.status
+        is_done = status == "completed"
+
+        stmt = select(func.count()).select_from(Chunk).where(Chunk.doc_id == doc.id)
+        total_chunks = (await db.execute(stmt)).scalar_one_or_none() or 0
+
+        stmt_abbr = select(func.count()).select_from(ExtractedItem).join(Chunk).where(
+            and_(Chunk.doc_id == doc.id, ExtractedItem.item_type == "abbr"))
+        total_found_abbrs = (await db.execute(stmt_abbr)).scalar_one_or_none() or 0
+
+        stmt_term = select(func.count()).select_from(ExtractedItem).join(Chunk).where(
+            and_(Chunk.doc_id == doc.id, ExtractedItem.item_type == "term"))
+        total_found_terms = (await db.execute(stmt_term)).scalar_one_or_none() or 0
+
+        if is_done:
+            abbrs_extracted_chunks = total_chunks
+            terms_extracted_chunks = total_chunks
+
+            abbrs_definition_processed = total_found_abbrs
+            terms_definition_processed = total_found_terms
+        else:
+            abbrs_extracted_chunks = int(
+                await redis.get(f"doc:{document_id}:abbrs_extraction_processed") or doc.finding_abbr_chunks or 0)
+            terms_extracted_chunks = int(
+                await redis.get(f"doc:{document_id}:terms_extraction_processed") or doc.finding_term_chunks or 0)
+
+            abbrs_definition_processed = int(
+                await redis.get(f"doc:{document_id}:abbrs_definition_processed") or doc.defining_abbrs or 0)
+            terms_definition_processed = int(
+                await redis.get(f"doc:{document_id}:terms_definition_processed") or doc.defining_terms or 0)
+
+        stmt_def_abbr = select(func.count()).select_from(ExtractedItem).join(Chunk).where(
+            and_(Chunk.doc_id == doc.id, ExtractedItem.item_type == "abbr", ExtractedItem.is_final,
+                 ExtractedItem.definition.isnot(None), ExtractedItem.definition != "")
         )
+        total_defined_abbrs = (await db.execute(stmt_def_abbr)).scalar_one_or_none() or 0
 
-        total_chunks = db.query(Chunk).filter_by(doc_id=doc.id).count()
-        logger.debug(f"[CHUNK] [COUNT] Всего чанков для doc_id={doc.id}: {total_chunks}")
-
-        total_found_abbrs = (
-            db.query(ExtractedItem)
-            .join(Chunk)
-            .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == "abbr")
-            .count()
+        stmt_def_term = select(func.count()).select_from(ExtractedItem).join(Chunk).where(
+            and_(Chunk.doc_id == doc.id, ExtractedItem.item_type == "term", ExtractedItem.is_final,
+                 ExtractedItem.definition.isnot(None), ExtractedItem.definition != "")
         )
+        total_defined_terms = (await db.execute(stmt_def_term)).scalar_one_or_none() or 0
 
-        total_found_terms = (
-            db.query(ExtractedItem)
-            .join(Chunk)
-            .filter(Chunk.doc_id == doc.id, ExtractedItem.item_type == "term")
-            .count()
-        )
-
-        logger.info(
-            f"[EXTRACT] [COUNT] Найдено сущностей: abbr={total_found_abbrs}, term={total_found_terms}"
-        )
-
-        total_defined_abbrs = (
-            db.query(ExtractedItem)
-            .join(Chunk)
-            .filter(
-                Chunk.doc_id == doc.id,
-                ExtractedItem.item_type == "abbr",
-                ExtractedItem.is_final,
-                ExtractedItem.definition.isnot(None),
-                ExtractedItem.definition != "",
-            )
-            .count()
-        )
-
-        total_defined_terms = (
-            db.query(ExtractedItem)
-            .join(Chunk)
-            .filter(
-                Chunk.doc_id == doc.id,
-                ExtractedItem.item_type == "term",
-                ExtractedItem.is_final,
-                ExtractedItem.definition.isnot(None),
-                ExtractedItem.definition != "",
-            )
-            .count()
-        )
-
-        logger.info(
-            f"[DEFINE] [COUNT] Определений: abbr={total_defined_abbrs}, term={total_defined_terms}"
-        )
-
-        logger.info(f"[STATUS] [DOC] [RESULT] Статус документа {document_id} сформирован успешно")
+        stages = {
+            "abbrs_extract": is_done or status in ["defining", "resolving", "transliterating"],
+            "terms_extract": is_done or status in ["defining", "resolving", "transliterating"],
+            "abbrs_define": is_done or status in ["resolving", "transliterating"],
+            "terms_define": is_done or status in ["resolving", "transliterating"]
+        }
 
         return {
             "document_id": document_id,
-            "status": doc.status,
-            "stages": {
-                "abbrs_extract": doc.abbr_search_done,
-                "terms_extract": doc.term_search_done,
-                "abbrs_define": doc.abbr_defs_done,
-                "terms_define": doc.term_defs_done,
-            },
+            "status": status,
+            "stages": stages,
             "extracting": {
                 "chunks_total": total_chunks,
-                "abbrs_extraction_processed": doc.finding_abbr_chunks,
-                "terms_extraction_processed": doc.finding_term_chunks,
+                "abbrs_extraction_processed": abbrs_extracted_chunks,
+                "terms_extraction_processed": terms_extracted_chunks,
                 "abbrs_extracted": total_found_abbrs,
                 "terms_extracted": total_found_terms,
             },
             "defining": {
                 "abbrs_total": total_found_abbrs,
                 "terms_total": total_found_terms,
-                "abbrs_definition_processed": doc.defining_abbrs,
-                "terms_definition_processed": doc.defining_terms,
+                "abbrs_definition_processed": abbrs_definition_processed,
+                "terms_definition_processed": terms_definition_processed,
                 "abbrs_defined": total_defined_abbrs,
                 "terms_defined": total_defined_terms,
             },
@@ -124,45 +104,41 @@ def get_doc_status(document_id: str, db: Session = Depends(get_db)):
 
     except HTTPException:
         raise
-
-    except SQLAlchemyError as e:
-        logger.error(
-            f"[STATUS] [DOC] [ERROR] Ошибка БД при получении статуса документа {document_id}: {e}",
-            exc_info=True,
-        )
-        raise HTTPException(status_code=500, detail="Ошибка базы данных при получении статуса")
-
     except Exception as e:
-        logger.error(
-            f"[STATUS] [DOC] [ERROR] Неожиданная ошибка при получении статуса документа {document_id}: {e}",
-            exc_info=True,
-        )
+        logger.error(f"[STATUS] [DOC] [ERROR] Неожиданная ошибка: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
 
 
 @router.get("/documents/stats")
-def get_documents_statistics(db: Session = Depends(get_db)):
+async def get_documents_statistics(db: AsyncSession = Depends(get_db)):
     """
     Возвращает расширенную статистику: документы, сырые находки (с учетом уникальности)
     и состояние итогового глобального словаря.
     """
     logger.info("[STATUS] [STATS] [REQUEST] Запрос расширенной статистики")
     try:
-        total_docs = db.query(Document).count()
-        completed_docs = db.query(Document).filter_by(status="completed").count()
+        stmt = select(func.count()).select_from(Document)
+        rslt = await db.execute(stmt)
+        total_docs = rslt.scalar()
+
+        stmt = select(func.count()).where(Document.status == "completed").select_from(Document)
+        rslt = await db.execute(stmt)
+        completed_docs = rslt.scalar()
+
         logger.info(
             f"[STATUS] [STATS] Документы: total={total_docs}, completed={completed_docs}"
         )
 
-        raw_stats = (
-            db.query(
+        stmt = (
+            select(
                 ExtractedItem.item_type,
                 func.count(ExtractedItem.id).label("total"),
                 func.count(func.distinct(ExtractedItem.word)).label("unique"),
             )
             .group_by(ExtractedItem.item_type)
-            .all()
         )
+        rslt = await db.execute(stmt)
+        raw_stats = rslt.all()
 
         raw_data = {
             r.item_type: {"total": r.total, "unique": r.unique} for r in raw_stats
@@ -171,22 +147,22 @@ def get_documents_statistics(db: Session = Depends(get_db)):
             f"[STATUS] [STATS] Сырые находки: abbr={raw_data.get('abbr')}, term={raw_data.get('term')}"
         )
 
-        global_stats = (
-            db.query(GlobalDictionary.item_type, func.count(GlobalDictionary.id))
+        stmt = (
+            select(GlobalDictionary.item_type, func.count(GlobalDictionary.id))
             .group_by(GlobalDictionary.item_type)
-            .all()
         )
+        rslt = await db.execute(stmt)
+        global_stats = rslt.all()
 
         global_map = {item_type: count for item_type, count in global_stats}
         logger.info(
             f"[STATUS] [STATS] Глобальный словарь: {global_map}"
         )
 
-        build_states = (
-            db.execute(select(SystemState).where(SystemState.key.like("build_%")))
-            .scalars()
-            .all()
-        )
+        stmt = select(SystemState).where(SystemState.key.like("build_%"))
+        rslt = await db.execute(stmt)
+        build_states = rslt.scalars().all()
+
         is_syncing = any(s.value == "processing" for s in build_states)
         logger.info(
             f"[STATUS] [STATS] Состояние синхронизации: is_building={is_syncing}, states={ {s.key: s.value for s in build_states} }"
@@ -234,8 +210,9 @@ def get_documents_statistics(db: Session = Depends(get_db)):
         )
         raise HTTPException(status_code=500, detail="Внутренняя ошибка сервера")
 
+
 @router.get("/documents/list")
-def list_documents(limit: int = 50, offset: int = 0, db: Session = Depends(get_db)):
+async def list_documents(limit: int = 50, offset: int = 0, db: AsyncSession = Depends(get_db)):
     """
     Возвращает список всех документов в базе данных.
 
@@ -243,8 +220,8 @@ def list_documents(limit: int = 50, offset: int = 0, db: Session = Depends(get_d
     Поддерживает пагинацию.
 
     Args:
-        limit: максимальное количество документов (по умолчанию 50).
-        offset: смещение для пагинации (по умолчанию 0).
+        limit (int): максимальное количество документов (по умолчанию 50).
+        offset (int): смещение для пагинации (по умолчанию 0).
 
     Returns:
         Список документов с id, именем, статусом и датой создания.
@@ -266,19 +243,19 @@ def list_documents(limit: int = 50, offset: int = 0, db: Session = Depends(get_d
         )
 
     try:
-        docs = (
-            db.query(Document)
-            .order_by(Document.created_at.desc())
-            .offset(offset)
-            .limit(limit)
-            .all()
-        )
-        total = db.query(Document).count()
+        stmt = select(Document).order_by(Document.created_at.desc()).offset(offset).limit(limit)
+        rslt = await db.execute(stmt)
+        docs = rslt.scalars().all()
+
+        stmt = select(func.count()).select_from(Document)
+        rslt = await db.execute(stmt)
+        total = rslt.scalar()
+
         logger.info(
             f"[STATUS] [LIST] [RESULT] Найдено документов: {len(docs)}, всего: {total}"
         )
         return {
-            "total": db.query(Document).count(),
+            "total": total,
             "offset": offset,
             "limit": limit,
             "documents": [

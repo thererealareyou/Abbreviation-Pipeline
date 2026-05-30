@@ -1,9 +1,10 @@
 import random
 import time
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import delete
-from sqlalchemy.orm import Session
 
 from src.backend.models import Chunk, Document, ExtractedItem
 from src.backend.schemas import ResetRequest
@@ -12,7 +13,6 @@ from src.utils.logger import PipelineLogger
 
 router = APIRouter(prefix="/danger")
 logger = PipelineLogger.get_logger(__name__)
-
 
 security_store: dict = {
     "reset_code": None,
@@ -41,7 +41,7 @@ def generate_reset_code():
 
 
 @router.delete("/clear-database")
-def clear_database(payload: ResetRequest, db: Session = Depends(get_db)):
+async def clear_database(payload: ResetRequest, db: AsyncSession = Depends(get_db)):
     """
     Очищает базу данных документов, оставляет глобальный словарь и транслитерационную таблицу.
 
@@ -59,10 +59,10 @@ def clear_database(payload: ResetRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=403, detail="Неверный код подтверждения.")
 
     try:
-        db.execute(delete(ExtractedItem))
-        db.execute(delete(Chunk))
-        db.execute(delete(Document))
-        db.commit()
+        await db.execute(delete(ExtractedItem))
+        await db.execute(delete(Chunk))
+        await db.execute(delete(Document))
+        await db.commit()
 
         security_store["reset_code"] = None
         security_store["expires_at"] = 0
@@ -70,5 +70,5 @@ def clear_database(payload: ResetRequest, db: Session = Depends(get_db)):
         return {"status": "success", "message": "База данных полностью очищена."}
 
     except Exception as e:
-        db.rollback()
+        await db.rollback()
         raise HTTPException(status_code=500, detail=f"Ошибка при очистке БД: {str(e)}")

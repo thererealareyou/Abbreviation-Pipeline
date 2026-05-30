@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import sys
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -27,6 +28,30 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(log_record, ensure_ascii=False)
 
 
+class ReadableConsoleFormatter(logging.Formatter):
+    """Красивый текстовый форматтер для локальной разработки."""
+
+    def format(self, record):
+        colors = {
+            "DEBUG": "\033[36m",  # Циан
+            "INFO": "\033[32m",  # Зеленый
+            "WARNING": "\033[33m",  # Желтый
+            "ERROR": "\033[31m",  # Красный
+            "CRITICAL": "\033[41m",  # Красный фон
+        }
+        reset = "\033[0m"
+        color = colors.get(record.levelname, "")
+
+        timestamp = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        trace_id = trace_id_var.get()
+
+        log_str = f"{timestamp} {color}[{record.levelname:<7}]{reset} [{trace_id}] {record.name}: {record.getMessage()}"
+
+        if record.exc_info:
+            log_str += f"\n{self.formatException(record.exc_info)}"
+        return log_str
+
+
 class PipelineLogger:
     @staticmethod
     def setup_logging(level: int = logging.INFO):
@@ -37,10 +62,13 @@ class PipelineLogger:
         if root_logger.hasHandlers():
             root_logger.handlers.clear()
 
-        json_formatter = JSONFormatter()
+        is_development = os.getenv("APP_ENV", "production") == "development"
 
         console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setFormatter(json_formatter)
+        if is_development:
+            console_handler.setFormatter(ReadableConsoleFormatter())
+        else:
+            console_handler.setFormatter(JSONFormatter())
         root_logger.addHandler(console_handler)
 
         log_path = Path("logs/app.log")
@@ -48,12 +76,12 @@ class PipelineLogger:
         file_handler = RotatingFileHandler(
             log_path, maxBytes=50 * 1024 * 1024, backupCount=10, encoding="utf-8"
         )
-        file_handler.setFormatter(json_formatter)
+        file_handler.setFormatter(JSONFormatter())
         root_logger.addHandler(file_handler)
 
         logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
         logging.getLogger("httpx").setLevel(logging.WARNING)
-        logging.getLogger("celery").setLevel(logging.INFO)
+        logging.getLogger("arq").setLevel(logging.INFO)
 
     @staticmethod
     def get_logger(name: str) -> logging.Logger:
