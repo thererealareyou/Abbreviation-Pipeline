@@ -1,0 +1,22 @@
+[project]
+name = "abbreviation-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "aiohttp>=3.13.5",
+    "alembic>=1.18.4",
+    "arq>=0.28.0",
+    "dotenv>=0.9.9",
+    "fastapi>=0.136.3",
+    "hiredis>=3.3.1",
+    "httpx>=0.28.1",
+    "psycopg>=3.3.4",
+    "pydantic-settings>=2.14.1",
+    "pyyaml>=6.0.3",
+    "rapidfuzz>=3.14.5",
+    "tinycss2>=1.4.0",
+    "transliterate>=1.10.2",
+    "uvicorn>=0.48.0",
+]

@@ -1,7 +1,6 @@
 from itertools import product
 from typing import List
 
-
 ENG_TO_RU: dict[str, list[str]] = {
     "A": ["эй", "а", "э", "ей", "эи", "еи", "ай"],
     "B": ["би", "б"],

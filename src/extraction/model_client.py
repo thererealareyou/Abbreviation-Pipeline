@@ -1,12 +1,12 @@
+import asyncio
 import json
 import re
-from config import config
 
-import yaml
-import asyncio
 import aiohttp
-from src.utils.logger import PipelineLogger
+import yaml
 
+from config import config
+from src.utils.logger import PipelineLogger
 
 logger = PipelineLogger.get_logger(__name__)
 
@@ -16,7 +16,10 @@ with open("config/prompts.yaml", "r", encoding="utf-8") as f:
 
 class AsyncAPIModelClient:
     """Асинхронный клиент для обращения к локальному серверу (llama.cpp server) батчами."""
-    def __init__(self, url: str, temperature: float, max_parallel: int) -> None:
+
+    def __init__(
+            self, url: str, temperature: float, max_parallel: int
+    ) -> None:
         """
         Args:
             url (str): URL-адрес API локального сервера.
@@ -28,8 +31,14 @@ class AsyncAPIModelClient:
         self.url = url
         self.temperature = temperature
         self.semaphore = asyncio.Semaphore(max_parallel)
+        logger.info(
+            f"[LLM] [INIT] Создан клиент LLM: url={url},"
+            f"temperature={temperature}, max_parallel={max_parallel}"
+        )
 
-    async def generate_async(self, session: aiohttp.ClientSession, prompt: str, stage: str) -> str:
+    async def generate_async(
+            self, session: aiohttp.ClientSession, prompt: str, stage: str
+    ) -> str:
         """Выполняет асинхронный запрос к LLM для генерации ответа.
 
         Внимание: параметр prompt теперь ожидает ПОЛНОСТЬЮ готовую строку
@@ -47,35 +56,52 @@ class AsyncAPIModelClient:
         """
 
         messages = [
-            {"role": "system", "content": prompts['llm'][stage]['role_prompt']},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": prompts["llm"][stage]["role_prompt"]},
+            {"role": "user", "content": prompt},
         ]
 
         payload = {
             "messages": messages,
             "max_tokens": 300,
             "temperature": self.temperature,
-            "cache_prompt": True
+            "cache_prompt": True,
         }
+
+        logger.info(
+            f"[LLM] [REQUEST] Этап: {stage}, длина промпта: {len(prompt)} символов"
+        )
 
         async with self.semaphore:
             try:
-                endpoint = f"{self.url}/v1/chat/completions" if not self.url.endswith(
-                    "/v1/chat/completions") else self.url
-
-                async with session.post(endpoint, json=payload) as response:
+                async with session.post(self.url, json=payload) as response:
                     if response.status != 200:
                         error_text = await response.text()
-                        logger.error(f"\n[HTTP ОШИБКА {response.status} на этапе {stage}]. Ответ сервера: {error_text}")
+                        logger.error(
+                            f"[LLM] [RESPONSE] [ERROR] HTTP {response.status} на этапе {stage}: {error_text}"
+                        )
                         logger.debug(f"Сломанный промпт: {prompt[:200]}...")
                         return "[]"
 
                     res_json = await response.json()
+                    content = res_json["choices"][0]["message"]["content"]
+                    logger.info(
+                        f"[LLM] [RESPONSE] Этап: {stage}, длина ответа: {len(content)} символов, ответ: {content[:200]}."
+                    )
                     return res_json["choices"][0]["message"]["content"]
 
-            except Exception as e:
-                logger.error(f"[Критическая ошибка aiohttp]: {e}")
+            except aiohttp.ClientError as e:
+                logger.error(
+                    f"[LLM] [REQUEST] [ERROR] Ошибка соединения с LLM ({self.url}) на этапе {stage}: {e}",
+                    exc_info=True,
+                )
                 return "[]"
+            except Exception as e:
+                logger.error(
+                    f"[LLM] [REQUEST] [ERROR] Неожиданная ошибка при запросе к LLM на этапе {stage}: {e}",
+                    exc_info=True,
+                )
+                return "[]"
+
 
 def get_llm_client():
     """Создает и возвращает настроенный экземпляр асинхронного клиента LLM.
@@ -86,17 +112,21 @@ def get_llm_client():
     """
     try:
         return AsyncAPIModelClient(
-            url=config.LLM_API_URL,
+            url=config.LLM_CHAT_URL,
             temperature=0.0,
-            max_parallel=8
+            max_parallel=8,
         )
     except Exception as e:
+        logger.error(
+            f"[LLM] [INIT] [ERROR] Не удалось создать клиент LLM: {e}",
+            exc_info=True,
+        )
         logger.error(f"Ошибка при получении экземпляра клиента LLM: {e}")
 
 
 def parse_llm_definition_response(response_text: str) -> str | None:
     try:
-        match = re.search(r"\{.*?\}", response_text, re.DOTALL)
+        match = re.search(r"{.*?}", response_text, re.DOTALL)
         if not match:
             return None
 
@@ -106,19 +136,32 @@ def parse_llm_definition_response(response_text: str) -> str | None:
         if data.get("has_definition") and exp:
             return str(exp).strip()
     except Exception as e:
-        logger.error(f"[PARSE DEF] Ошибка парсинга: {e}")
+        logger.error(f"[DEFINE] [PARSE] [ERROR] Ошибка парсинга определения: {e}")
         return None
     return None
 
 
 def parse_llm_extraction_response(response_text: str) -> list[str]:
-    if not response_text: return []
-    try:
-        match = re.search(r"\[.*?\]", response_text, re.DOTALL)
-        if not match: return []
-
-        data = json.loads(match.group(0))
-        return [str(item).strip() for item in data if item]
-    except Exception as e:
-        logger.error(f"[PARSE EXTRACT] Ошибка: {e}")
+    """Извлекает все уникальные строки из всех JSON-массивов, найденных в ответе модели."""
+    if not response_text:
         return []
+    candidates = re.findall(r'\[(?:[^\[\]]|\[(?:[^\[\]]|\[[^\]]*\])*\])*\]', response_text)
+    items = []
+    for cand in candidates:
+        cand = cand.rstrip('.')
+        try:
+            parsed = json.loads(cand)
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if isinstance(item, str):
+                        items.append(item.strip())
+        except json.JSONDecodeError:
+            continue
+
+    seen = set()
+    unique = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            unique.append(item)
+    return unique

@@ -1,65 +1,59 @@
-import os
-import re
-import yaml
-from dotenv import load_dotenv
-
-load_dotenv()
-
-def _interpolate(value):
-    if isinstance(value, str):
-        def replacer(match):
-            var_name = match.group(1) or match.group(2)
-            return os.getenv(var_name, match.group(0))
-
-        pattern = r'\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z0-9_]*)'
-        return re.sub(pattern, replacer, value)
-    elif isinstance(value, dict):
-        return {k: _interpolate(v) for k, v in value.items()}
-    elif isinstance(value, list):
-        return [_interpolate(item) for item in value]
-    else:
-        return value
+from httpx import URL
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def load_config():
-    try:
-        env = os.getenv("CONFIG")
-    except KeyError:
-        raise KeyError("Не установлена переменная CONFIG в .env")
-    config_path = os.path.join(os.path.dirname(__file__), f"{env}.yaml")
-    with open(config_path, "r") as f:
-        raw_config = yaml.safe_load(f)
-    config_data = _interpolate(raw_config)
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"
+    )
 
-    class Config:
-        def __init__(self, data):
-            for key, value in data.items():
-                if isinstance(value, dict):
-                    setattr(self, key, Config(value))
-                else:
-                    setattr(self, key, value)
+    DATABASE_URL: str
+    REDIS_URL: str
+    LLM_API_URL: str
+    LLM_HEALTH_ENDPOINT: str
+    LLM_API_ENDPOINT: str
 
-        @property
-        def DATABASE_URL(self):
-            db = self.database
-            return f"postgresql://{db.user}:{db.password}@{db.host}:{db.port}/{db.db}"
+    @property
+    def LLM_CHAT_URL(self) -> str:
+        """Полный URL для отправки промптов"""
+        return str(URL(self.LLM_API_URL).join(self.LLM_API_ENDPOINT))
 
-        @property
-        def CELERY_BROKER_URL(self):
-            rb = self.rabbitmq
-            return f"amqp://{rb.user}:{rb.password}@{rb.host}:{rb.port}//"
+    @property
+    def LLM_HEALTH_URL(self) -> str:
+        """Полный URL для проверки здоровья сервиса"""
+        return str(URL(self.LLM_API_URL).join(self.LLM_HEALTH_ENDPOINT))
 
-        @property
-        def LLM_API_URL(self):
-            llm = self.llm
-            return f"http://{llm.host}:{llm.port}"
-
-        @property
-        def BATCH_SIZE(self):
-            pipeline = self.pipeline
-            return pipeline.batch_size
-
-    return Config(config_data)
+    BATCH_SIZE: int = 10
+    MAX_WORKERS: int = 8
 
 
-config = load_config()
+config = Settings()
+
+DOCUMENT_PIPELINE_CONFIG = [
+    {
+        "stage": "extract",
+        "batch_size": config.BATCH_SIZE,
+        "tasks": ["bulk_extract_terms", "bulk_extract_abbrs"]
+    },
+    {
+        "stage": "define",
+        "batch_size": config.BATCH_SIZE,
+        "tasks": [
+            {"task": "bulk_define_terms", "type": "term"},
+            {"task": "bulk_define_abbrs", "type": "abbr"}
+        ]
+    }
+]
+
+GLOBAL_DICT_PIPELINE_CONFIG = [
+    {
+        "stage": "resolve",
+        "tasks": ["bulk_resolve_terms", "bulk_resolve_abbrs"]
+    },
+    {
+        "stage": "transliterate",
+        "tasks": ["bulk_transliterate_abbrs"]
+    }
+]

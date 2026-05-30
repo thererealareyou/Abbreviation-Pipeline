@@ -1,9 +1,11 @@
 import uuid
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import DateTime, Boolean, text, String, ForeignKey, Text, CheckConstraint
+
+from sqlalchemy import (Boolean, CheckConstraint, DateTime, ForeignKey, String,
+                        Text, text)
 from sqlalchemy.dialects.postgresql import UUID
-from sqlalchemy.orm import Mapped, mapped_column, DeclarativeBase, relationship
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
 
@@ -17,17 +19,23 @@ class MixinCore:
         primary_key=True,
         default=uuid.uuid4,
         index=True,
-        unique=True
+        unique=True,
     )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, onupdate=func.now())
-    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default=text("false"))
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, onupdate=func.now()
+    )
+    is_deleted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false")
+    )
 
 
 class Document(Base, MixinCore):
     __tablename__ = "documents"
 
-    filename: Mapped[str] = mapped_column(String(255), index=True, nullable=False, unique=True)
+    filename: Mapped[str] = mapped_column(
+        String(255), index=True, nullable=False, unique=True
+    )
     status: Mapped[str] = mapped_column(String(50), default="processing")
 
     # --- Стадии пайплайна (Mapped автоматически подхватит тип bool) ---
@@ -56,7 +64,9 @@ class Document(Base, MixinCore):
     abbr_batches_total: Mapped[int] = mapped_column(server_default="0")
     abbr_batches_done: Mapped[int] = mapped_column(server_default="0")
 
-    chunks: Mapped[list["Chunk"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+    chunks: Mapped[list["Chunk"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan"
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -69,18 +79,24 @@ class Document(Base, MixinCore):
 class Chunk(Base, MixinCore):
     __tablename__ = "chunks"
 
-    doc_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
+    doc_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
     text: Mapped[str] = mapped_column(Text)
     order: Mapped[int] = mapped_column()
 
     document: Mapped["Document"] = relationship(back_populates="chunks")
-    items: Mapped[list["ExtractedItem"]] = relationship(back_populates="chunk", cascade="all, delete-orphan")
+    items: Mapped[list["ExtractedItem"]] = relationship(
+        back_populates="chunk", cascade="all, delete-orphan"
+    )
 
 
 class ExtractedItem(Base, MixinCore):
     __tablename__ = "extracted_items"
 
-    chunk_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("chunks.id", ondelete="CASCADE"), index=True)
+    chunk_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("chunks.id", ondelete="CASCADE"), index=True
+    )
     item_type: Mapped[str] = mapped_column(String(20))
     word: Mapped[str] = mapped_column(String(255))
     definition: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -108,7 +124,11 @@ class TransliterationDictionary(Base, MixinCore):
 class SystemState(Base):
     __tablename__ = "system_state"
 
-    key: Mapped[str] = mapped_column(String(50), primary_key=True) # "dict_build_status"
-    value: Mapped[str] = mapped_column(String(50)) # "processing", "ready", "error"
-    updated_at: Mapped[datetime] = mapped_column(default=func.now(), onupdate=func.now())
+    key: Mapped[str] = mapped_column(
+        String(50), primary_key=True
+    )  # "dict_build_status"
+    value: Mapped[str] = mapped_column(String(50))  # "processing", "ready", "error"
+    updated_at: Mapped[datetime] = mapped_column(
+        default=func.now(), onupdate=func.now()
+    )
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

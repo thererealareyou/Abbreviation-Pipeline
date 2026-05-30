@@ -151,6 +151,7 @@ activemq-data/
 .env
 .envrc
 .venv
+.lvenv/
 env/
 venv/
 ENV/
@@ -224,3 +225,10 @@ __pycache__/
 .idea/
 .log
 logs/
+
+.uv/
+
+__pycache__/
+*.pyc
+
+requirements.txt
